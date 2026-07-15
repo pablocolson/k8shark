@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +28,7 @@ const protocolVersion = "2024-11-05"
 // Server exposes the hub REST API to an AI agent over MCP/stdio.
 type Server struct {
 	hubURL       string
+	hubToken     string // bearer token for the hub API ("" = no auth)
 	allowCapture bool
 	log          *slog.Logger
 	http         *http.Client
@@ -44,12 +44,14 @@ type tool struct {
 	handler     func(ctx context.Context, args map[string]any) (string, error)
 }
 
-// New builds an MCP server that talks to the hub at hubURL. When allowCapture
-// is true the (placeholder) PCAP capture tool is registered as well. log must
-// write to stderr — stdout is the protocol channel.
-func New(hubURL string, allowCapture bool, log *slog.Logger) *Server {
+// New builds an MCP server that talks to the hub at hubURL, authenticating
+// with hubToken when non-empty. When allowCapture is true the (placeholder)
+// PCAP capture tool is registered as well. log must write to stderr — stdout
+// is the protocol channel.
+func New(hubURL, hubToken string, allowCapture bool, log *slog.Logger) *Server {
 	s := &Server{
 		hubURL:       strings.TrimRight(hubURL, "/"),
+		hubToken:     hubToken,
 		allowCapture: allowCapture,
 		log:          log,
 		http:         &http.Client{Timeout: 10 * time.Second},
@@ -245,34 +247,51 @@ func (s *Server) registerTools() {
 	noArgs := func() map[string]any {
 		return map[string]any{"type": "object", "properties": map[string]any{}}
 	}
+	// filterDesc documents IFL once for every tool that accepts a filter.
+	const filterDesc = "IFL filter, e.g. `response.status >= 500 and dst.namespace == \"shop\"` or " +
+		"`elapsedMs > 500`. Fields include protocol, status, elapsedMs, http.method, response.status, " +
+		"src.name, src.namespace, src.workload, dst.name, dst.namespace, dst.workload, request.path, " +
+		"dns.rcode, redis.command, postgres.query. Operators: == != contains > < >= <=, combined with " +
+		"and/or/not. Unknown field names are rejected — call list_filter_fields for the full catalog."
+	timeProps := func() (map[string]any, map[string]any) {
+		return map[string]any{
+				"type":        "string",
+				"description": "Only entries at/after this time: RFC3339 (\"2026-07-15T14:00:00Z\"), unix seconds, or a relative duration meaning that long ago (\"15m\", \"1h\").",
+			}, map[string]any{
+				"type":        "string",
+				"description": "Only entries at/before this time (same formats as since).",
+			}
+	}
+	sinceProp, untilProp := timeProps()
 	s.tools = []*tool{
 		{
-			name:        "get_stats",
-			description: "Get aggregate traffic statistics from the hub: total entries, entries/sec, worker count, and counts broken down by protocol and by status.",
+			name: "get_stats",
+			description: "Get aggregate traffic statistics from the hub: total entries, entries/sec, worker count, " +
+				"counts by protocol and by status, plus trailing 1m/5m windows (entries, errors, rate) for current-state questions.",
 			inputSchema: noArgs(),
 			handler:     s.handleGetStats,
 		},
 		{
-			name:        "list_entries",
-			description: "List recent captured L7 entries (newest first) as compact records. Optionally narrow the results with an IFL filter expression.",
+			name: "list_entries",
+			description: "List recent captured L7 entries (newest first) as compact records " +
+				"(id, protocol, time, src, dst, summary, response, status, latency). Narrow with an IFL filter and/or a time range.",
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"filter": map[string]any{
-						"type":        "string",
-						"description": "IFL filter, e.g. `response.status >= 500 and dst.namespace == \"shop\"`. Fields include protocol, http.method, response.status, src.name, dst.namespace, request.path. Operators: == != contains > < >= <=, combined with and/or/not.",
-					},
+					"filter": map[string]any{"type": "string", "description": filterDesc},
 					"limit": map[string]any{
 						"type":        "number",
 						"description": "Maximum entries to return (default 100, clamped to 1..1000).",
 					},
+					"since": sinceProp,
+					"until": untilProp,
 				},
 			},
 			handler: s.handleListEntries,
 		},
 		{
 			name:        "get_entry",
-			description: "Fetch the full JSON of a single captured entry by its ID.",
+			description: "Fetch the full JSON of a single captured entry by its ID (headers, bodies, timings, L4 metadata).",
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -283,14 +302,72 @@ func (s *Server) registerTools() {
 			handler: s.handleGetEntry,
 		},
 		{
+			name: "get_traffic_summary",
+			description: "Aggregate the buffered traffic per group: entry count, error/warning counts, protocols and " +
+				"latency percentiles (p50/p95/max) per workload, namespace, or any filter field. The fastest way to answer " +
+				"\"which service is failing/slow?\" — prefer this over pulling raw entries.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"group_by": map[string]any{
+						"type": "string",
+						"description": "Grouping key: \"workload\" (default; namespace/workload across both endpoints), " +
+							"\"namespace\", or any IFL field (e.g. dst.name, protocol, node, http.method).",
+					},
+					"filter": map[string]any{"type": "string", "description": filterDesc},
+					"since":  sinceProp,
+					"until":  untilProp,
+					"limit": map[string]any{
+						"type":        "number",
+						"description": "Maximum groups to return (default 25, busiest first).",
+					},
+				},
+			},
+			handler: s.handleTrafficSummary,
+		},
+		{
+			name: "get_timeline",
+			description: "Bucket matching traffic into a fixed-step time series (entries, errors, warnings per bucket, " +
+				"zero-filled) — use it to spot when a problem started or whether it is ongoing.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"filter": map[string]any{"type": "string", "description": filterDesc},
+					"bucket_seconds": map[string]any{
+						"type":        "number",
+						"description": "Bucket width in seconds (default 60, clamped to 1..3600).",
+					},
+					"since": sinceProp,
+					"until": untilProp,
+				},
+			},
+			handler: s.handleTimeline,
+		},
+		{
+			name: "get_workers",
+			description: "List every capture worker the hub has seen: node, version, connected or not, last-seen time, " +
+				"entries received, self-reported drop count and capture state. Check this first when traffic from a node " +
+				"seems missing — it distinguishes \"nothing to capture\" from \"worker down or dropping\".",
+			inputSchema: noArgs(),
+			handler:     s.handleGetWorkers,
+		},
+		{
+			name: "list_filter_fields",
+			description: "List every IFL filter field with its type, operators and most-seen values — call this before " +
+				"writing non-trivial filters.",
+			inputSchema: noArgs(),
+			handler:     s.handleListFilterFields,
+		},
+		{
 			name:        "list_namespaces",
-			description: "List the Kubernetes namespaces seen in recent traffic, each with a count of entries that touch it.",
+			description: "List the Kubernetes namespaces seen in buffered traffic, with entry/error counts and latency percentiles.",
 			inputSchema: noArgs(),
 			handler:     s.handleListNamespaces,
 		},
 		{
-			name:        "list_workloads",
-			description: "List the workloads (name + namespace) seen in recent traffic, each with the set of protocols observed and an entry count.",
+			name: "list_workloads",
+			description: "List the workloads (namespace/name) seen in buffered traffic, with protocols, entry/error counts " +
+				"and latency percentiles.",
 			inputSchema: noArgs(),
 			handler:     s.handleListWorkloads,
 		},
@@ -334,6 +411,7 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 	if f := argString(args, "filter"); f != "" {
 		q.Set("filter", f)
 	}
+	setTimeArgs(q, args)
 	q.Set("limit", strconv.Itoa(limit))
 
 	var entries []api.Entry
@@ -342,7 +420,7 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 	}
 	compact := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
-		compact = append(compact, map[string]any{
+		rec := map[string]any{
 			"id":         e.ID,
 			"protocol":   e.Protocol,
 			"time":       e.Timestamp,
@@ -352,13 +430,30 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 			"status":     e.Status,
 			"statusCode": e.StatusCode,
 			"elapsedMs":  e.ElapsedMs,
-		})
+		}
+		// The response summary carries the outcome text (error line, rcode,
+		// redis reply type, ...) — key context an agent would otherwise
+		// re-fetch entry by entry.
+		if e.Response.Summary != "" {
+			rec["response"] = e.Response.Summary
+		}
+		compact = append(compact, rec)
 	}
 	b, err := json.MarshalIndent(compact, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshaling entries: %w", err)
 	}
 	return fmt.Sprintf("%d entries\n%s", len(compact), b), nil
+}
+
+// setTimeArgs copies the optional since/until tool args onto a hub query.
+func setTimeArgs(q url.Values, args map[string]any) {
+	if v := argString(args, "since"); v != "" {
+		q.Set("since", v)
+	}
+	if v := argString(args, "until"); v != "" {
+		q.Set("until", v)
+	}
 }
 
 func (s *Server) handleGetEntry(ctx context.Context, args map[string]any) (string, error) {
@@ -383,90 +478,82 @@ func (s *Server) handleGetEntry(ctx context.Context, args map[string]any) (strin
 	return marshalPretty(e, "entry")
 }
 
-func (s *Server) handleListNamespaces(ctx context.Context, _ map[string]any) (string, error) {
-	var entries []api.Entry
-	if err := s.getJSON(ctx, "/api/entries?limit=1000", &entries); err != nil {
+// handleTrafficSummary proxies /api/summary: per-group counts, error totals
+// and latency percentiles, computed hub-side over the whole buffer.
+func (s *Server) handleTrafficSummary(ctx context.Context, args map[string]any) (string, error) {
+	q := url.Values{}
+	if g := argString(args, "group_by"); g != "" {
+		q.Set("groupBy", g)
+	}
+	if f := argString(args, "filter"); f != "" {
+		q.Set("filter", f)
+	}
+	setTimeArgs(q, args)
+	limit := argInt(args, "limit", 25)
+	q.Set("limit", strconv.Itoa(limit))
+	return s.getPretty(ctx, "/api/summary?"+q.Encode(), "summary")
+}
+
+// handleTimeline proxies /api/timeline: zero-filled per-bucket entry/error
+// counts across the requested window (default: last 15 minutes).
+func (s *Server) handleTimeline(ctx context.Context, args map[string]any) (string, error) {
+	q := url.Values{}
+	if f := argString(args, "filter"); f != "" {
+		q.Set("filter", f)
+	}
+	setTimeArgs(q, args)
+	if b := argInt(args, "bucket_seconds", 0); b > 0 {
+		q.Set("bucket", strconv.Itoa(b))
+	}
+	return s.getPretty(ctx, "/api/timeline?"+q.Encode(), "timeline")
+}
+
+// handleGetWorkers proxies /api/workers: the per-node capture health registry.
+func (s *Server) handleGetWorkers(ctx context.Context, _ map[string]any) (string, error) {
+	return s.getPretty(ctx, "/api/workers", "workers")
+}
+
+// handleListFilterFields renders the hub's field catalog, truncating each
+// field's observed values so the result stays compact.
+func (s *Server) handleListFilterFields(ctx context.Context, _ map[string]any) (string, error) {
+	var catalog struct {
+		Fields []struct {
+			Name      string   `json:"name"`
+			Type      string   `json:"type"`
+			Operators []string `json:"operators"`
+			Values    []struct {
+				Value string `json:"value"`
+				Count int64  `json:"count"`
+			} `json:"values"`
+		} `json:"fields"`
+	}
+	if err := s.getJSON(ctx, "/api/fields", &catalog); err != nil {
 		return "", err
 	}
-	counts := map[string]int{}
-	for _, e := range entries {
-		seen := map[string]struct{}{}
-		for _, ns := range []string{e.Source.Namespace, e.Destination.Namespace} {
-			if ns == "" {
-				continue
-			}
-			if _, dup := seen[ns]; dup {
-				continue
-			}
-			seen[ns] = struct{}{}
-			counts[ns]++
+	const maxValues = 8
+	type field struct {
+		Name      string   `json:"name"`
+		Type      string   `json:"type"`
+		Operators []string `json:"operators"`
+		Values    []string `json:"values,omitempty"`
+	}
+	out := make([]field, 0, len(catalog.Fields))
+	for _, f := range catalog.Fields {
+		vals := make([]string, 0, min(len(f.Values), maxValues))
+		for _, v := range f.Values[:min(len(f.Values), maxValues)] {
+			vals = append(vals, v.Value)
 		}
+		out = append(out, field{Name: f.Name, Type: f.Type, Operators: f.Operators, Values: vals})
 	}
-	type nsCount struct {
-		Namespace string `json:"namespace"`
-		Count     int    `json:"count"`
-	}
-	out := make([]nsCount, 0, len(counts))
-	for ns, c := range counts {
-		out = append(out, nsCount{Namespace: ns, Count: c})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Namespace < out[j].Namespace })
-	return marshalPretty(out, "namespaces")
+	return marshalPretty(out, "fields")
+}
+
+func (s *Server) handleListNamespaces(ctx context.Context, _ map[string]any) (string, error) {
+	return s.getPretty(ctx, "/api/summary?groupBy=namespace&limit=200", "namespaces")
 }
 
 func (s *Server) handleListWorkloads(ctx context.Context, _ map[string]any) (string, error) {
-	var entries []api.Entry
-	if err := s.getJSON(ctx, "/api/entries?limit=1000", &entries); err != nil {
-		return "", err
-	}
-	type key struct{ name, namespace string }
-	type acc struct {
-		count     int
-		protocols map[string]struct{}
-	}
-	m := map[key]*acc{}
-	for _, e := range entries {
-		seen := map[key]struct{}{}
-		for _, ep := range []api.Endpoint{e.Source, e.Destination} {
-			if ep.Name == "" {
-				continue
-			}
-			k := key{ep.Name, ep.Namespace}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			seen[k] = struct{}{}
-			a := m[k]
-			if a == nil {
-				a = &acc{protocols: map[string]struct{}{}}
-				m[k] = a
-			}
-			a.count++
-			a.protocols[string(e.Protocol)] = struct{}{}
-		}
-	}
-	type workload struct {
-		Name      string   `json:"name"`
-		Namespace string   `json:"namespace"`
-		Protocols []string `json:"protocols"`
-		Count     int      `json:"count"`
-	}
-	out := make([]workload, 0, len(m))
-	for k, a := range m {
-		protos := make([]string, 0, len(a.protocols))
-		for p := range a.protocols {
-			protos = append(protos, p)
-		}
-		sort.Strings(protos)
-		out = append(out, workload{Name: k.name, Namespace: k.namespace, Protocols: protos, Count: a.count})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Namespace != out[j].Namespace {
-			return out[i].Namespace < out[j].Namespace
-		}
-		return out[i].Name < out[j].Name
-	})
-	return marshalPretty(out, "workloads")
+	return s.getPretty(ctx, "/api/summary?groupBy=workload&limit=200", "workloads")
 }
 
 func (s *Server) handleStartPcap(_ context.Context, _ map[string]any) (string, error) {
@@ -482,6 +569,9 @@ func (s *Server) get(ctx context.Context, path string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.hubURL+path, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("building request: %w", err)
+	}
+	if s.hubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.hubToken)
 	}
 	resp, err := s.http.Do(req)
 	if err != nil {
@@ -510,6 +600,16 @@ func (s *Server) getJSON(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// getPretty GETs path and re-renders the JSON body indented, for tools that
+// pass a hub response through unchanged.
+func (s *Server) getPretty(ctx context.Context, path, what string) (string, error) {
+	var v any
+	if err := s.getJSON(ctx, path, &v); err != nil {
+		return "", err
+	}
+	return marshalPretty(v, what)
+}
+
 // --- small helpers ---------------------------------------------------------
 
 func marshalPretty(v any, what string) (string, error) {
@@ -520,12 +620,23 @@ func marshalPretty(v any, what string) (string, error) {
 	return string(b), nil
 }
 
-// endpointLabel prefers a human name over the raw IP.
+// endpointLabel renders an endpoint as "namespace/workload:port", preferring
+// the stable workload name, then the pod/service name, then the raw IP.
 func endpointLabel(ep api.Endpoint) string {
-	if ep.Name != "" {
-		return ep.Name
+	name := ep.Workload
+	if name == "" {
+		name = ep.Name
 	}
-	return ep.IP
+	if name == "" {
+		name = ep.IP
+	}
+	if ep.Namespace != "" {
+		name = ep.Namespace + "/" + name
+	}
+	if ep.Port > 0 {
+		name += ":" + strconv.Itoa(ep.Port)
+	}
+	return name
 }
 
 func argString(args map[string]any, key string) string {

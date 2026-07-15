@@ -179,6 +179,74 @@ func TestCompileFilterErrors(t *testing.T) {
 	}
 }
 
+// Latency and workload are first-class filter fields — the two most common
+// debugging pivots ("what's slow?", "which service?").
+func TestCompileFilterLatencyAndWorkload(t *testing.T) {
+	e := sample()
+	e.ElapsedMs = 750
+	e.Source.Workload = "frontend"
+	e.Destination.Workload = "payment"
+	e.L4 = &api.L4Info{DurationMs: 1200}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`elapsedMs > 500`, true},
+		{`elapsedms > 500`, true}, // case-insensitive
+		{`latency > 500`, true},   // alias
+		{`elapsedMs > 800`, false},
+		{`elapsedMs <= 750`, true},
+		{`src.workload == "frontend"`, true},
+		{`dst.workload == "payment"`, true},
+		{`dst.workload == "checkout"`, false},
+		{`l4.durationms >= 1000`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	// l4.durationms must not match when L4 is absent.
+	pred, _ := CompileFilter(`l4.durationms == 0`)
+	if pred(sample()) {
+		t.Error("l4.durationms == 0 matched an entry with no L4 (want false)")
+	}
+}
+
+// An unknown field in a comparison must be a compile error, not a silent
+// match-nothing — a typo would otherwise read as "no matching traffic".
+func TestCompileFilterUnknownField(t *testing.T) {
+	for _, expr := range []string{
+		`http.status_code == 500`, // typo of response.status
+		`namespcae == "shop"`,
+		`elapsed_ms > 100`,
+	} {
+		if _, err := CompileFilter(expr); err == nil {
+			t.Errorf("expected unknown-field error for %q, got nil", expr)
+		}
+	}
+	// Bare tokens (full-text) still compile — only `field op value` is strict.
+	if _, err := CompileFilter("checkout"); err != nil {
+		t.Errorf("bare token should compile, got %v", err)
+	}
+}
+
+// Every catalog entry must resolve through fieldGetter, so the /api/fields
+// autocomplete never advertises a field the filter would then reject.
+func TestFieldCatalogMatchesGetter(t *testing.T) {
+	for _, spec := range fieldCatalog {
+		if fieldGetter(spec.Name) == nil {
+			t.Errorf("catalog field %q has no fieldGetter case", spec.Name)
+		}
+	}
+}
+
 // TestCompileFilterDoS guards the unauthenticated ?filter= surface: a
 // pathologically nested or oversized expression must return an error, never a
 // panic/stack-overflow crash.

@@ -55,10 +55,13 @@ var fieldCatalog = []FieldSpec{
 	{Name: "status", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
 		EnumValues: []string{"success", "warning", "error"}},
 	{Name: "node", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "elapsedMs", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "src.name", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.namespace", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "src.workload", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "dst.name", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "dst.namespace", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "dst.workload", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.ip", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "dst.ip", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.port", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
@@ -95,6 +98,7 @@ var fieldCatalog = []FieldSpec{
 	{Name: "l4.window", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "l4.mss", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: true},
 	{Name: "l4.rttms", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "l4.durationms", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "l4.clientbytes", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "l4.serverbytes", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "tls.sni", Type: FieldTypeString, Operators: opsString, TrackValues: true},
@@ -180,7 +184,11 @@ func (f *facetIndex) observe(e *api.Entry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for name, fc := range f.fields {
-		v := fieldGetter(name)(e)
+		get := fieldGetter(name)
+		if get == nil {
+			continue // catalog/getter drift — never panic the ingest path
+		}
+		v := get(e)
 		if v == "" {
 			continue
 		}

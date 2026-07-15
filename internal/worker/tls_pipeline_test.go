@@ -41,7 +41,7 @@ func (f *fakeTLSSource) Close() error {
 // consumeTLS must produce exactly one paired api.Entry — proving decrypted
 // TLS records reach the same dissector plaintext AF_PACKET traffic uses.
 func TestConsumeTLSPairsDecryptedHTTP(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	src := newFakeTLSSource()
 
@@ -88,7 +88,7 @@ func TestConsumeTLSPairsDecryptedHTTP(t *testing.T) {
 // eBPF connID must reach the Postgres dissector (not the HTTP default) and
 // produce a paired protocol=postgres entry.
 func TestConsumeTLSDispatchesDecryptedPostgres(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	src := newFakeTLSSource()
 
@@ -129,7 +129,7 @@ func TestConsumeTLSDispatchesDecryptedPostgres(t *testing.T) {
 // 4-tuple (Phase 2b kprobe), the emitted entry shows the real IPs/ports, not
 // the synthetic pid:<n> endpoint.
 func TestConsumeTLSRealTupleEndpoints(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	src := newFakeTLSSource()
 
@@ -174,7 +174,7 @@ func TestConsumeTLSRealTupleEndpoints(t *testing.T) {
 // client's queries (requests) — inverted from the client case. Content-based
 // role detection must still produce a correct protocol=postgres entry.
 func TestConsumeTLSServerSidePostgres(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	src := newFakeTLSSource()
 

@@ -185,7 +185,7 @@ func discardLogger() *slog.Logger {
 }
 
 func TestServeMuxRoutesDoNotShadowExisting(t *testing.T) {
-	srv := New(discardLogger(), "")
+	srv := New(discardLogger(), Options{})
 	srv.store.add(sample())
 
 	mux := http.NewServeMux()
@@ -225,7 +225,7 @@ func TestServeMuxRoutesDoNotShadowExisting(t *testing.T) {
 // surfaces protocol's static domain (e.g. "amqp"/"valkey") even with zero
 // traffic observed so far.
 func TestFreshStoreStillOffersStaticEnumValues(t *testing.T) {
-	srv := New(discardLogger(), "")
+	srv := New(discardLogger(), Options{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/fields", nil)
