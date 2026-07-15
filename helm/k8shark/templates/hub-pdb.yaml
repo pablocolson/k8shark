@@ -1,0 +1,21 @@
+{{- /*
+Guard the hub against involuntary disruption (node drains) with a
+PodDisruptionBudget. minAvailable: 1 keeps at least one hub pod running.
+Skipped when replicas < 1 (minAvailable: 1 would be unsatisfiable and block
+drains). Gated behind pdb.enabled (default true).
+*/ -}}
+{{- if and .Values.pdb.enabled (ge (int .Values.hub.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: k8shark-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+    app.kubernetes.io/name: k8shark-hub
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8shark-hub
+{{- end }}

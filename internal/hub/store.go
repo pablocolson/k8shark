@@ -1,0 +1,159 @@
+package hub
+
+import (
+	"sync"
+	"time"
+
+	"github.com/pablocolson/k8shark/pkg/api"
+)
+
+// store is a bounded, thread-safe ring buffer of the most recent entries plus
+// rolling aggregate counters. It is the hub's only source of truth for the REST
+// API and for replaying history to newly-connected front clients.
+type store struct {
+	mu       sync.RWMutex
+	buf      []*api.Entry
+	capacity int
+	next     int // write cursor into buf
+	full     bool
+
+	// byID indexes live buffer entries for O(1) get(). Kept in sync with buf:
+	// an entry is added on write and removed when its slot is overwritten.
+	byID map[string]*api.Entry
+
+	total      int64
+	byProtocol map[string]int64
+	byStatus   map[string]int64
+
+	// rate tracking
+	rateWindow []time.Time
+
+	// facets tracks observed field values for IFL autocomplete. It owns its
+	// own mutex, fully decoupled from s.mu.
+	facets *facetIndex
+}
+
+func newStore(capacity int) *store {
+	return &store{
+		buf:        make([]*api.Entry, capacity),
+		capacity:   capacity,
+		byID:       map[string]*api.Entry{},
+		byProtocol: map[string]int64{},
+		byStatus:   map[string]int64{},
+		facets:     newFacetIndex(),
+	}
+}
+
+// add records an entry and updates aggregates.
+func (s *store) add(e *api.Entry) {
+	s.mu.Lock()
+
+	// Evict the entry currently in this slot from the id index before overwriting
+	// it (guarding against a same-id re-add having already replaced the mapping).
+	if old := s.buf[s.next]; old != nil && s.byID[old.ID] == old {
+		delete(s.byID, old.ID)
+	}
+	s.buf[s.next] = e
+	s.byID[e.ID] = e
+	s.next = (s.next + 1) % s.capacity
+	if s.next == 0 {
+		s.full = true
+	}
+
+	s.total++
+	s.byProtocol[string(e.Protocol)]++
+	if e.Status != "" {
+		s.byStatus[e.Status]++
+	}
+
+	s.rateWindow = append(s.rateWindow, e.Timestamp)
+	s.trimRate(e.Timestamp)
+
+	s.mu.Unlock()
+
+	// Facet observation uses its own mutex and must run outside store's
+	// critical section, so it never extends store.mu's hold time.
+	s.facets.observe(e)
+}
+
+// trimRate drops rate samples older than the 5s window. Caller holds the lock.
+func (s *store) trimRate(now time.Time) {
+	cutoff := now.Add(-5 * time.Second)
+	i := 0
+	for i < len(s.rateWindow) && s.rateWindow[i].Before(cutoff) {
+		i++
+	}
+	if i > 0 {
+		s.rateWindow = s.rateWindow[i:]
+	}
+}
+
+// recent returns up to limit of the most recent entries, newest first, that
+// satisfy match. A nil match accepts everything.
+func (s *store) recent(limit int, match func(*api.Entry) bool) []*api.Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*api.Entry, 0, limit)
+	// Walk backwards from the most recently written slot.
+	n := s.capacity
+	if !s.full {
+		n = s.next
+	}
+	for i := 0; i < n && len(out) < limit; i++ {
+		idx := (s.next - 1 - i + s.capacity) % s.capacity
+		e := s.buf[idx]
+		if e == nil {
+			continue
+		}
+		if match == nil || match(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// get returns the entry with the given id, or nil. O(1) via the byID index.
+func (s *store) get(id string) *api.Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.byID[id]
+}
+
+// stats snapshots the current aggregates. workers is supplied by the caller
+// since worker connections are tracked by the server, not the store.
+func (s *store) stats(workers int) api.Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	byProto := make(map[string]int64, len(s.byProtocol))
+	for k, v := range s.byProtocol {
+		byProto[k] = v
+	}
+	byStatus := make(map[string]int64, len(s.byStatus))
+	for k, v := range s.byStatus {
+		byStatus[k] = v
+	}
+
+	// Count samples inside the trailing 5s window without mutating rateWindow
+	// (stats holds only RLock, and the rate must decay to 0 when traffic stops
+	// rather than freezing at the last trimmed length). rateWindow is appended
+	// in timestamp order, so walk from the newest end until we fall out of the
+	// window.
+	cutoff := time.Now().Add(-5 * time.Second)
+	recent := 0
+	for i := len(s.rateWindow) - 1; i >= 0; i-- {
+		if s.rateWindow[i].Before(cutoff) {
+			break
+		}
+		recent++
+	}
+
+	return api.Stats{
+		TotalEntries:  s.total,
+		EntriesPerSec: float64(recent) / 5.0,
+		Workers:       workers,
+		ByProtocol:    byProto,
+		ByStatus:      byStatus,
+	}
+}

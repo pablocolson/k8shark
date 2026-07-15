@@ -1,0 +1,8 @@
+55a1b2c00000-55a1b2c21000 r-xp 00000000 08:01 100001                    /usr/bin/nginx
+7f2a1c000000-7f2a1c021000 r-xp 00000000 08:01 1234567                   /usr/lib/x86_64-linux-gnu/libssl.so.3
+7f2a1c021000-7f2a1c045000 r-xp 00000000 08:01 1234568                   /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+7f2a1c045000-7f2a1c050000 r-xp 00000000 08:01 1234569                   /usr/lib/x86_64-linux-gnu/libgnutls.so.30
+7f2a1c050000-7f2a1c060000 r-xp 00000000 08:01 1234570                   /usr/lib/x86_64-linux-gnu/libc.so.6
+7f2a1c060000-7f2a1c070000 r-xp 00000000 08:01 1234567                   /usr/lib/x86_64-linux-gnu/libssl.so.3
+7f2a1c070000-7f2a1c080000 rw-p 00000000 00:00 0
+7f2a1c080000-7f2a1c090000 r--p 00021000 08:01 1234567                   /usr/lib/x86_64-linux-gnu/libssl.so.3

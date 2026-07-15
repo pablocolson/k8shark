@@ -1,0 +1,269 @@
+# k8shark — all-in-one Kubernetes manifest
+#
+# This is a single-file, no-Helm deployment of k8shark, rendered from the
+# canonical chart at helm/k8shark for clusters/operators who prefer a plain
+# `kubectl apply -f` (or `kubectl apply -k`) workflow over Helm.
+#
+# It is hardened for a Talos Linux + Cilium cluster:
+#   - Namespace carries Pod Security Admission labels pinned to "privileged"
+#     (the worker DaemonSet needs eBPF/host-level capabilities that the
+#     "restricted"/"baseline" PSA levels reject outright).
+#   - RBAC is split per-component: only the hub ServiceAccount is bound to
+#     the read-only IP->workload enrichment ClusterRole; the worker
+#     ServiceAccount gets zero Kubernetes API permissions.
+#   - The worker tolerates all taints (including Talos control-plane taints)
+#     so exactly one worker pod runs per node.
+#
+# __REGISTRY__ and __TAG__ are literal placeholder tokens — this file is not
+# run through a live templating engine. Substitute them either via
+# `kubectl apply -k deploy/` (kustomize; edit deploy/kustomization.yaml's
+# images.newName/newTag first) or via `sed` before `kubectl apply -f -`.
+# See deploy/README.md for both paths, imagePullSecrets setup, and a
+# post-apply verification checklist.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8shark
+  labels:
+    app.kubernetes.io/part-of: k8shark
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8shark-hub
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8shark-worker
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8shark-front
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8shark-enrich
+  labels: { app.kubernetes.io/part-of: k8shark }
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8shark-enrich
+  labels: { app.kubernetes.io/part-of: k8shark }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8shark-enrich
+subjects:
+  - kind: ServiceAccount
+    name: k8shark-hub
+    namespace: k8shark
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8shark-hub
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark, app.kubernetes.io/name: k8shark-hub }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: k8shark-hub }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: k8shark-hub }
+    spec:
+      serviceAccountName: k8shark-hub
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: hub
+          image: __REGISTRY__/k8shark:__TAG__
+          imagePullPolicy: IfNotPresent
+          args: ["hub", "--port=8898", "--log-level=info"]
+          ports:
+            - { name: hub, containerPort: 8898 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8898 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8898 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8shark-hub
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark, app.kubernetes.io/name: k8shark-hub }
+spec:
+  selector: { app.kubernetes.io/name: k8shark-hub }
+  ports:
+    - { name: hub, port: 8898, targetPort: 8898 }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k8shark-worker
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark, app.kubernetes.io/name: k8shark-worker }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: k8shark-worker }
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: k8shark-worker }
+    spec:
+      serviceAccountName: k8shark-worker
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 10
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: worker
+          image: __REGISTRY__/k8shark:__TAG__
+          imagePullPolicy: IfNotPresent
+          args:
+            - worker
+            - --hub=ws://k8shark-hub.k8shark.svc:8898/ws/worker
+            - --node=$(NODE_NAME)
+            - --iface=
+            - --log-level=info
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
+                - BPF
+                - PERFMON
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - SYS_PTRACE
+          volumeMounts:
+            - { name: bpf-fs,   mountPath: /sys/fs/bpf,       mountPropagation: Bidirectional }
+            - { name: debug-fs, mountPath: /sys/kernel/debug, readOnly: false }
+            - { name: proc,     mountPath: /host/proc,        readOnly: true }
+            - { name: cgroup,   mountPath: /sys/fs/cgroup,    readOnly: false }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { memory: 512Mi }
+      volumes:
+        - name: bpf-fs
+          hostPath: { path: /sys/fs/bpf, type: DirectoryOrCreate }
+        - name: debug-fs
+          hostPath: { path: /sys/kernel/debug, type: Directory }
+        - name: proc
+          hostPath: { path: /proc, type: Directory }
+        - name: cgroup
+          hostPath: { path: /sys/fs/cgroup, type: Directory }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8shark-front
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark, app.kubernetes.io/name: k8shark-front }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: k8shark-front }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: k8shark-front }
+    spec:
+      serviceAccountName: k8shark-front
+      containers:
+        - name: front
+          image: __REGISTRY__/k8shark-front:__TAG__
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: HUB_HOST, value: k8shark-hub.k8shark.svc }
+            - { name: HUB_PORT, value: "8898" }
+          ports:
+            - { name: http, containerPort: 80 }
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8shark-front
+  namespace: k8shark
+  labels: { app.kubernetes.io/part-of: k8shark, app.kubernetes.io/name: k8shark-front }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: k8shark-front }
+  ports:
+    - { name: http, port: 80, targetPort: 80 }
+---
+# --- OPTIONAL INGRESS: uncomment and set host/class/TLS for your ingress controller ---
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: k8shark
+#   namespace: k8shark
+#   labels: { app.kubernetes.io/part-of: k8shark }
+#   annotations:
+#     # long-lived WebSocket /ws stream — set your controller's read-timeout equivalent
+# spec:
+#   ingressClassName: nginx
+#   rules:
+#     - host: k8shark.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: k8shark-front
+#                 port: { number: 80 }

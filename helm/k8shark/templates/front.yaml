@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8shark-front
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+    app.kubernetes.io/name: k8shark-front
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8shark-front
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8shark-front
+    spec:
+      containers:
+        - name: front
+          image: {{ include "k8shark.frontImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # nginx proxies /api and /ws to the hub service.
+            - name: HUB_HOST
+              value: k8shark-hub.{{ .Release.Namespace }}.svc
+            - name: HUB_PORT
+              value: "{{ .Values.hub.port }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.front.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.front.port }}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.front.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # nginx:1.27-alpine writes to /var/cache/nginx, /var/run and /tmp, so
+          # readOnlyRootFilesystem is intentionally left unset here (would need
+          # emptyDir mounts for those paths to enable it without breaking startup).
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            {{- toYaml .Values.front.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8shark-front
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+    app.kubernetes.io/name: k8shark-front
+spec:
+  type: {{ .Values.front.service.type }}
+  selector:
+    app.kubernetes.io/name: k8shark-front
+  ports:
+    - name: http
+      port: {{ .Values.front.port }}
+      targetPort: {{ .Values.front.port }}

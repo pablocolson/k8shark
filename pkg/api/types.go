@@ -1,0 +1,263 @@
+// Package api defines the wire contract shared by the worker, the hub and the
+// front-end. An Entry is a single reconstructed L7 interaction (a request paired
+// with its response) captured on the wire.
+package api
+
+import "time"
+
+// Protocol identifies the L7 protocol of an Entry.
+type Protocol string
+
+const (
+	ProtocolHTTP     Protocol = "http"
+	ProtocolDNS      Protocol = "dns"
+	ProtocolRedis    Protocol = "redis"
+	ProtocolValkey   Protocol = "valkey" // Redis-compatible RESP; distinguished only by config
+	ProtocolPostgres Protocol = "postgres"
+	ProtocolAMQP     Protocol = "amqp" // RabbitMQ / AMQP 0-9-1
+	ProtocolTCP      Protocol = "tcp"  // generic L4 flow (undissected TCP)
+	ProtocolUDP      Protocol = "udp"  // generic L4 flow (non-DNS UDP)
+	ProtocolICMP     Protocol = "icmp" // ICMP echo / errors
+)
+
+// Endpoint is one side of a captured conversation.
+type Endpoint struct {
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+	// Name is a best-effort human label (k8s pod/service, or resolved host).
+	Name string `json:"name,omitempty"`
+	// Namespace is the k8s namespace when known.
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// Payload holds the protocol-specific request or response details. Fields are
+// populated per-protocol; unused ones stay empty so the same shape serialises
+// cleanly to the front-end.
+type Payload struct {
+	// Common
+	Summary string            `json:"summary,omitempty"` // one-line human description
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
+	Size    int               `json:"size,omitempty"`
+
+	// HTTP
+	Method     string `json:"method,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Host       string `json:"host,omitempty"`
+	StatusCode int    `json:"statusCode,omitempty"`
+
+	// DNS
+	Question string `json:"question,omitempty"`
+	Answer   string `json:"answer,omitempty"`
+
+	// Redis
+	Command string `json:"command,omitempty"`
+
+	// Postgres
+	Query    string `json:"query,omitempty"`
+	RowCount int    `json:"rowCount,omitempty"`
+
+	// AMQP (RabbitMQ 0-9-1). The AMQP method name (e.g. "Publish") reuses the
+	// shared Method field above; Class (e.g. "Basic") is AMQP-only.
+	Exchange    string `json:"exchange,omitempty"`
+	RoutingKey  string `json:"routingKey,omitempty"`
+	Queue       string `json:"queue,omitempty"`
+	DeliveryTag uint64 `json:"deliveryTag,omitempty"`
+	Class       string `json:"class,omitempty"`
+
+	// L4 flows (tcp/udp/icmp)
+	Packets int64  `json:"packets,omitempty"`
+	Bytes   int64  `json:"bytes,omitempty"`
+	Flags   string `json:"flags,omitempty"` // e.g. "SYN,FIN" for TCP
+
+	// Full-fidelity extras (additive; protocol-specific sub-objects). Old
+	// front-ends ignore these; the canonical scalars above stay the values the
+	// IFL filter reads.
+	ContentType string       `json:"contentType,omitempty"`
+	Truncated   bool         `json:"truncated,omitempty"` // Body was cut at the capture cap
+	Raw         *RawView     `json:"raw,omitempty"`
+	HTTP        *HTTPDetail  `json:"http,omitempty"`
+	DNS         *DNSDetail   `json:"dns,omitempty"`
+	Redis       *RedisDetail `json:"redis,omitempty"`
+	Postgres    *PGDetail    `json:"postgres,omitempty"`
+}
+
+// L4Info is connection-level L2/L3/L4 metadata, captured from the packet
+// headers at route() time (not available to the reassembled L7 stream).
+type L4Info struct {
+	SrcMAC    string `json:"srcMac,omitempty"`
+	DstMAC    string `json:"dstMac,omitempty"`
+	IPVersion int    `json:"ipVersion,omitempty"` // 4 or 6
+	TTL       int    `json:"ttl,omitempty"`       // last client->server TTL/HopLimit
+	IPFlags   string `json:"ipFlags,omitempty"`   // "DF"|"MF"|"DF,MF"
+	// TCP (empty for udp/icmp)
+	ClientTCPFlags string  `json:"clientTcpFlags,omitempty"` // union seen client->server, e.g. "SYN,ACK,FIN"
+	ServerTCPFlags string  `json:"serverTcpFlags,omitempty"`
+	SeqStart       uint32  `json:"seqStart,omitempty"` // client ISN (from SYN)
+	AckStart       uint32  `json:"ackStart,omitempty"` // server ISN (from SYN-ACK)
+	Window         int     `json:"window,omitempty"`   // last client advertised window
+	MSS            int     `json:"mss,omitempty"`      // from SYN option
+	Retransmits    int     `json:"retransmits,omitempty"`
+	RTTMs          float64 `json:"rttMs,omitempty"`      // handshake SYN->SYN-ACK estimate
+	DurationMs     int64   `json:"durationMs,omitempty"` // firstSeen..lastSeen
+	// per-direction accounting (client = ephemeral/higher port heuristic)
+	ClientBytes   int64 `json:"clientBytes,omitempty"`
+	ServerBytes   int64 `json:"serverBytes,omitempty"`
+	ClientPackets int64 `json:"clientPackets,omitempty"`
+	ServerPackets int64 `json:"serverPackets,omitempty"`
+	// Decoded header block, bounded hex+ascii dump of the first packet's L2/L3/L4.
+	HeaderHex string   `json:"headerHex,omitempty"`
+	TLS       *TLSInfo `json:"tls,omitempty"` // only when a TLS ClientHello/ServerHello is sniffable (or via eBPF later)
+}
+
+// TLSInfo carries best-effort TLS handshake metadata (SNI, ALPN, version).
+type TLSInfo struct {
+	SNI     string `json:"sni,omitempty"`
+	ALPN    string `json:"alpn,omitempty"`
+	Version string `json:"version,omitempty"` // "TLS1.2"|"TLS1.3"
+	Cipher  string `json:"cipher,omitempty"`
+}
+
+// RawView is a bounded hex+ascii dump of one direction's application bytes.
+type RawView struct {
+	Hex       string `json:"hex,omitempty"`   // formatted "0000  48 54 54 50 ...  HTTP..." block
+	Bytes     int    `json:"bytes,omitempty"` // total bytes seen before truncation
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// HTTPDetail is the rich HTTP request/response extras.
+type HTTPDetail struct {
+	Version     string            `json:"version,omitempty"` // "HTTP/1.1"
+	Query       map[string]string `json:"query,omitempty"`   // parsed query params (request side)
+	ContentType string            `json:"contentType,omitempty"`
+	TTFBMs      int64             `json:"ttfbMs,omitempty"` // response side: request-sent -> first response byte
+}
+
+// DNSQuestion is one question section entry.
+type DNSQuestion struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"` // "A","AAAA","CNAME",...
+	Class string `json:"class,omitempty"`
+}
+
+// DNSRecord is one resource record (answer/authority/additional).
+type DNSRecord struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	TTL  uint32 `json:"ttl,omitempty"`
+	Data string `json:"data"` // rendered rdata (IP, target, TXT, ...)
+}
+
+// DNSDetail is the fully decoded DNS message.
+type DNSDetail struct {
+	ID            int           `json:"id,omitempty"`
+	Questions     []DNSQuestion `json:"questions,omitempty"`
+	Answers       []DNSRecord   `json:"answers,omitempty"`
+	Authority     []DNSRecord   `json:"authority,omitempty"`
+	Additional    []DNSRecord   `json:"additional,omitempty"`
+	Rcode         string        `json:"rcode,omitempty"`
+	Authoritative bool          `json:"authoritative,omitempty"`
+	RecursionAvl  bool          `json:"recursionAvailable,omitempty"`
+}
+
+// RedisDetail is the rich RESP request/response extras.
+type RedisDetail struct {
+	Args          []string          `json:"args,omitempty"`          // full command incl. every arg (request)
+	Reply         string            `json:"reply,omitempty"`         // fully rendered reply (response)
+	ReplyType     string            `json:"replyType,omitempty"`     // "string"|"array"|"error"|"integer"|"map"|"set"|"push"|"null"
+	DBIndex       int               `json:"dbIndex,omitempty"`       // tracked from SELECT n
+	PipelineDepth int               `json:"pipelineDepth,omitempty"` // outstanding pipelined requests when this one was queued
+	Attributes    map[string]string `json:"attributes,omitempty"`    // RESP3 |attribute pairs
+}
+
+// PGColumn is one RowDescription column.
+type PGColumn struct {
+	Name    string `json:"name"`
+	TypeOID int    `json:"typeOid,omitempty"`
+	Type    string `json:"type,omitempty"` // resolved name for common OIDs
+}
+
+// PGError is a decoded ErrorResponse.
+type PGError struct {
+	Severity string `json:"severity,omitempty"`
+	Code     string `json:"code,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+	Hint     string `json:"hint,omitempty"`
+	Where    string `json:"where,omitempty"`
+}
+
+// PGDetail is the rich Postgres request/response extras.
+type PGDetail struct {
+	StatementName string     `json:"statementName,omitempty"`
+	Portal        string     `json:"portal,omitempty"`
+	Params        []string   `json:"params,omitempty"`  // bind parameter values (request)
+	Columns       []PGColumn `json:"columns,omitempty"` // RowDescription (response)
+	Tag           string     `json:"tag,omitempty"`     // CommandComplete tag
+	Error         *PGError   `json:"error,omitempty"`
+	TxStatus      string     `json:"txStatus,omitempty"` // "I"|"T"|"E" from ReadyForQuery
+}
+
+// Entry is a single captured L7 interaction. It is the atomic unit streamed
+// from worker -> hub -> front.
+type Entry struct {
+	ID          string    `json:"id"`
+	Protocol    Protocol  `json:"protocol"`
+	Timestamp   time.Time `json:"timestamp"`
+	ElapsedMs   int64     `json:"elapsedMs"` // request->response latency
+	Node        string    `json:"node"`      // capturing node/worker
+	Source      Endpoint  `json:"src"`
+	Destination Endpoint  `json:"dst"`
+	Request     Payload   `json:"request"`
+	Response    Payload   `json:"response"`
+	// Status is a normalised outcome: "success" | "warning" | "error".
+	Status string `json:"status"`
+	// StatusCode is a protocol-agnostic numeric code (HTTP status, etc.) used
+	// for quick colouring in the UI.
+	StatusCode int `json:"statusCode"`
+	// L4 is connection-level L2/L3/L4 metadata for TCP/UDP entries (nil for
+	// entries captured mid-connection or without header context).
+	L4 *L4Info `json:"l4,omitempty"`
+}
+
+// --- Wire messages ---------------------------------------------------------
+
+// MessageType tags a WebSocket frame on both the worker->hub and hub->front
+// channels.
+type MessageType string
+
+const (
+	// worker -> hub / hub -> front
+	MsgEntry MessageType = "entry"
+	// hub -> front: periodic aggregate metrics
+	MsgStats MessageType = "stats"
+	// worker -> hub: identifies the worker on connect
+	MsgHello MessageType = "hello"
+	// front -> hub: set/replace the active KFL filter
+	MsgFilter MessageType = "filter"
+)
+
+// Envelope wraps every WebSocket frame. Exactly one of the payload pointers is
+// set, matching Type.
+type Envelope struct {
+	Type   MessageType `json:"type"`
+	Entry  *Entry      `json:"entry,omitempty"`
+	Stats  *Stats      `json:"stats,omitempty"`
+	Hello  *Hello      `json:"hello,omitempty"`
+	Filter string      `json:"filter,omitempty"`
+}
+
+// Hello is sent by a worker when it connects to the hub.
+type Hello struct {
+	Node    string `json:"node"`
+	Version string `json:"version"`
+}
+
+// Stats is a rolling aggregate the hub pushes to the front for the header/graphs.
+type Stats struct {
+	TotalEntries  int64            `json:"totalEntries"`
+	EntriesPerSec float64          `json:"entriesPerSec"`
+	Workers       int              `json:"workers"`
+	ByProtocol    map[string]int64 `json:"byProtocol"`
+	ByStatus      map[string]int64 `json:"byStatus"`
+}

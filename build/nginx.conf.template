@@ -1,0 +1,27 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # REST API -> hub
+    location /api/ {
+        proxy_pass http://${HUB_HOST}:${HUB_PORT};
+        proxy_set_header Host $host;
+    }
+
+    # WebSocket stream -> hub
+    location /ws {
+        proxy_pass http://${HUB_HOST}:${HUB_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+
+    # SPA fallback
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

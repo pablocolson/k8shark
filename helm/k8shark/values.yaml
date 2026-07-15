@@ -1,0 +1,86 @@
+# Default values for k8shark.
+
+image:
+  registry: ghcr.io/pablocolson
+  # binary image runs both the hub and the worker
+  binary: k8shark
+  # front image is nginx serving the built dashboard
+  front: k8shark-front
+  tag: latest
+  # NOTE: tag "latest" + pullPolicy IfNotPresent causes silent no-op upgrades —
+  # nodes that already cached an old "latest" keep running it. Set pullPolicy to
+  # Always when tag is "latest"; IfNotPresent is fine (and preferred) for pinned
+  # immutable tags.
+  pullPolicy: IfNotPresent
+
+# priorityClassName is applied to the hub pods when set (empty = cluster default).
+priorityClassName: ""
+
+# pdb: PodDisruptionBudget for the hub. minAvailable: 1 protects the
+# single-replica hub during voluntary disruptions (node drains). Skipped
+# automatically if hub.replicas < 1.
+pdb:
+  enabled: true
+
+hub:
+  port: 8898
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+front:
+  port: 80
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+worker:
+  # demo: generate synthetic traffic instead of capturing real packets.
+  # Handy for a first look on clusters where privileged capture is disallowed.
+  demo: false
+  # capture interface ("" = any)
+  iface: ""
+  # valkeyPorts: RESP ports to relabel as "valkey" instead of "redis" in the
+  # dashboard. Valkey and Redis speak the identical wire protocol, so this is
+  # config-driven, not auto-detected. e.g. [6379] if that port runs Valkey.
+  valkeyPorts: []
+  # amqpPorts: extra ports carrying AMQP 0-9-1 (RabbitMQ), in addition to the
+  # 5672 default. e.g. [5673] for a second broker port.
+  amqpPorts: []
+  # capture: per-direction extraction depth bounds. Defaults preserve the built-in
+  # behaviour (bodies captured, 4096 B body cap, 2048 B raw hex cap).
+  capture:
+    captureBodies: true # set false to omit request/response bodies entirely
+    bodyBytes: 0        # 0 = default 4096; max body bytes per direction
+    rawBytes: 0         # 0 = default 2048; <0 disables the raw hex view
+  # tls: eBPF uprobe TLS capture (hybrid layer — keeps AF_PACKET for plaintext,
+  # adds OpenSSL/boringssl uprobes for HTTPS). Off by default and fully
+  # additive: AF_PACKET behavior is identical either way.
+  # Needs hostPID (to discover other pods' TLS libraries via /proc) plus the
+  # BPF/PERFMON/SYS_ADMIN/SYS_RESOURCE/SYS_PTRACE capabilities and bpffs/btf/
+  # hostproc mounts below — all gated on tls.enabled so the default
+  # AF_PACKET-only install keeps today's narrower privilege set.
+  tls:
+    enabled: false # attach OpenSSL/boringssl uprobes to decrypt TLS traffic
+    goTLS: false   # Go crypto/tls uprobes — Phase 2b, not implemented yet
+    debugfs: false # mount /sys/kernel/debug; usually unnecessary on modern kernels
+  # AF_PACKET capture needs elevated privileges and the host network namespace.
+  hostNetwork: true
+  privileged: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+logLevel: info

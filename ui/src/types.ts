@@ -1,0 +1,207 @@
+// Mirrors pkg/api/types.go — keep in sync with the Go wire contract.
+
+export type Protocol =
+  | "http"
+  | "dns"
+  | "redis"
+  | "valkey"
+  | "postgres"
+  | "amqp"
+  | "tcp"
+  | "udp"
+  | "icmp";
+
+export interface Endpoint {
+  ip: string;
+  port: number;
+  name?: string;
+  namespace?: string;
+}
+
+// --- richer per-protocol sub-objects (mirrors pkg/api/types.go, all optional) --
+
+export interface TLSInfo {
+  sni?: string;
+  alpn?: string;
+  version?: string;
+  cipher?: string;
+}
+
+export interface L4Info {
+  srcMac?: string;
+  dstMac?: string;
+  ipVersion?: number;
+  ttl?: number;
+  ipFlags?: string;
+  clientTcpFlags?: string;
+  serverTcpFlags?: string;
+  seqStart?: number;
+  ackStart?: number;
+  window?: number;
+  mss?: number;
+  retransmits?: number;
+  rttMs?: number;
+  durationMs?: number;
+  clientBytes?: number;
+  serverBytes?: number;
+  clientPackets?: number;
+  serverPackets?: number;
+  headerHex?: string;
+  tls?: TLSInfo;
+}
+
+export interface RawView {
+  hex?: string;
+  bytes?: number;
+  truncated?: boolean;
+}
+
+export interface HTTPDetail {
+  version?: string;
+  query?: Record<string, string>;
+  contentType?: string;
+  ttfbMs?: number;
+}
+
+export interface DNSQuestion {
+  name: string;
+  type: string;
+  class?: string;
+}
+
+export interface DNSRecord {
+  name: string;
+  type: string;
+  ttl?: number;
+  data: string;
+}
+
+export interface DNSDetail {
+  id?: number;
+  questions?: DNSQuestion[];
+  answers?: DNSRecord[];
+  authority?: DNSRecord[];
+  additional?: DNSRecord[];
+  rcode?: string;
+  authoritative?: boolean;
+  recursionAvailable?: boolean;
+}
+
+export interface RedisDetail {
+  args?: string[];
+  reply?: string;
+  replyType?: string;
+  dbIndex?: number;
+  pipelineDepth?: number;
+  attributes?: Record<string, string>;
+}
+
+export interface PGColumn {
+  name: string;
+  typeOid?: number;
+  type?: string;
+}
+
+export interface PGError {
+  severity?: string;
+  code?: string;
+  message?: string;
+  detail?: string;
+  hint?: string;
+  where?: string;
+}
+
+export interface PGDetail {
+  statementName?: string;
+  portal?: string;
+  params?: string[];
+  columns?: PGColumn[];
+  tag?: string;
+  error?: PGError;
+  txStatus?: string;
+}
+
+export interface Payload {
+  summary?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  size?: number;
+  method?: string;
+  path?: string;
+  host?: string;
+  statusCode?: number;
+  question?: string;
+  answer?: string;
+  command?: string;
+  query?: string;
+  rowCount?: number;
+  // AMQP
+  exchange?: string;
+  routingKey?: string;
+  queue?: string;
+  deliveryTag?: number;
+  class?: string;
+  // L4 flows
+  packets?: number;
+  bytes?: number;
+  flags?: string;
+  // richer extras
+  contentType?: string;
+  truncated?: boolean;
+  raw?: RawView;
+  http?: HTTPDetail;
+  dns?: DNSDetail;
+  redis?: RedisDetail;
+  postgres?: PGDetail;
+}
+
+export interface Entry {
+  id: string;
+  protocol: Protocol;
+  timestamp: string;
+  elapsedMs: number;
+  node: string;
+  src: Endpoint;
+  dst: Endpoint;
+  request: Payload;
+  response: Payload;
+  status: "success" | "warning" | "error" | "";
+  statusCode: number;
+  l4?: L4Info;
+}
+
+export interface Stats {
+  totalEntries: number;
+  entriesPerSec: number;
+  workers: number;
+  byProtocol: Record<string, number>;
+  byStatus: Record<string, number>;
+}
+
+export interface Envelope {
+  type: "entry" | "stats" | "hello" | "filter";
+  entry?: Entry;
+  stats?: Stats;
+  filter?: string;
+}
+
+// --- IFL autocomplete (field catalog) ---------------------------------------
+// Mirrors GET /api/fields and GET /api/fields/{field}/values.
+
+export interface FieldValue {
+  value: string;
+  count: number;
+}
+
+export type FieldType = "enum" | "number" | "string" | "freetext";
+
+export interface FieldMeta {
+  name: string;
+  type: FieldType;
+  operators: string[];
+  values?: FieldValue[];
+}
+
+export interface FieldsResponse {
+  fields: FieldMeta[];
+}
