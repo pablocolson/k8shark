@@ -238,6 +238,8 @@ const (
 	MsgHello MessageType = "hello"
 	// front -> hub: set/replace the active KFL filter
 	MsgFilter MessageType = "filter"
+	// hub -> front: a ?filter= or filter frame failed to compile
+	MsgFilterError MessageType = "filterError"
 	// worker -> hub: periodic worker self-report (drop counters, capture state)
 	MsgWorkerStats MessageType = "workerStats"
 )
@@ -250,6 +252,7 @@ type Envelope struct {
 	Stats       *Stats       `json:"stats,omitempty"`
 	Hello       *Hello       `json:"hello,omitempty"`
 	Filter      string       `json:"filter,omitempty"`
+	Error       string       `json:"error,omitempty"`
 	WorkerStats *WorkerStats `json:"workerStats,omitempty"`
 }
 
@@ -285,8 +288,21 @@ type Stats struct {
 	Workers       int              `json:"workers"`
 	ByProtocol    map[string]int64 `json:"byProtocol"`
 	ByStatus      map[string]int64 `json:"byStatus"`
+	// BroadcastDropped counts entries dropped to slow front clients (send
+	// buffer full) since the hub started — a degradation signal beyond the
+	// binary connected/disconnected indicator.
+	BroadcastDropped int64 `json:"broadcastDropped"`
 	// Last1m/Last5m are trailing windows over the in-memory buffer (nil on old
 	// hubs; additive).
 	Last1m *WindowStats `json:"last1m,omitempty"`
 	Last5m *WindowStats `json:"last5m,omitempty"`
+}
+
+// StatsPoint is one sample in the hub's rolling stats history (see
+// GET /api/stats/history), used to chart throughput trends — e.g. a
+// "entries/sec over the last few minutes" sparkline.
+type StatsPoint struct {
+	Timestamp     time.Time `json:"timestamp"`
+	EntriesPerSec float64   `json:"entriesPerSec"`
+	TotalEntries  int64     `json:"totalEntries"`
 }

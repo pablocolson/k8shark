@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -93,5 +94,39 @@ func TestTrackTCPCloseEmitsL4(t *testing.T) {
 	}
 	if got[0].L4.TTL != 128 {
 		t.Errorf("L4.TTL = %d, want 128", got[0].L4.TTL)
+	}
+}
+
+// A generic (undissected) TCP flow now samples its payload into Request.Raw,
+// same as the L7 dissectors already did — previously only HTTP/Redis/
+// Postgres/AMQP populated Raw at all.
+func TestTrackTCPCapturesRawPayload(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	reqNet, reqTr, _, _ := flows(41001, 443)
+	base := time.Unix(1_700_000_001, 0)
+
+	p.trackTCP(reqNet, reqTr, mkTCP(1, true, false, false, 1000, 0), 60, base, l4meta{})
+
+	data := mkTCP(2, false, true, false, 1000, 0)
+	data.Payload = []byte("hello from the client")
+	p.trackTCP(reqNet, reqTr, data, 60+len(data.Payload), base.Add(time.Millisecond), l4meta{})
+
+	fin := mkTCP(2+uint32(len(data.Payload)), false, true, true, 1000, 0)
+	p.trackTCP(reqNet, reqTr, fin, 60, base.Add(2*time.Millisecond), l4meta{})
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	raw := got[0].Request.Raw
+	if raw == nil {
+		t.Fatal("generic L4 flow has no Raw view (payload was seen but not captured)")
+	}
+	if raw.Bytes != len(data.Payload) {
+		t.Errorf("raw.Bytes = %d, want %d", raw.Bytes, len(data.Payload))
+	}
+	if !strings.Contains(raw.Hex, "hello") {
+		t.Errorf("raw.Hex = %q, want it to contain the captured payload text", raw.Hex)
 	}
 }

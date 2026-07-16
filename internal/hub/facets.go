@@ -110,6 +110,33 @@ var fieldCatalog = []FieldSpec{
 	{Name: "amqp.exchange", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "amqp.routingkey", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "amqp.queue", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "amqp.deliverytag", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+
+	// Previously display-only fields, now filterable (roadmap: "champs backend
+	// déjà calculés, invisibles côté UI").
+	{Name: "redis.pipelinedepth", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: true},
+	{Name: "postgres.portal", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "dns.authoritative", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
+		EnumValues: []string{"true", "false"}},
+	{Name: "dns.recursionavailable", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
+		EnumValues: []string{"true", "false"}},
+	{Name: "request.size", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "response.size", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "postgres.rowcount", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "http.ttfbms", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+
+	// Remaining L4Info fields (previously view-only in the detail L4 tab).
+	{Name: "l4.srcmac", Type: FieldTypeString, Operators: opsString, TrackValues: false},
+	{Name: "l4.dstmac", Type: FieldTypeString, Operators: opsString, TrackValues: false},
+	{Name: "l4.ipversion", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
+		EnumValues: []string{"4", "6"}},
+	{Name: "l4.ipflags", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "l4.clienttcpflags", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "l4.servertcpflags", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "l4.seqstart", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "l4.ackstart", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "l4.clientpackets", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "l4.serverpackets", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 }
 
 // fieldSpecByName is the derived lookup table built once at init.

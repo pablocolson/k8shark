@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -511,7 +512,7 @@ func TestDNSAnswerDetail(t *testing.T) {
 	reqNet, _, respNet, _ := flows(50000, 53)
 
 	q := &layers.DNS{ID: 7, Questions: []layers.DNSQuestion{{Name: []byte("svc.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}}
-	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50000, DstPort: 53}, q)
+	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50000, DstPort: 53}, q, []byte("raw-query-bytes"))
 
 	resp := &layers.DNS{
 		ID: 7, QR: true, AA: true, RA: true, ResponseCode: layers.DNSResponseCodeNoErr,
@@ -520,7 +521,7 @@ func TestDNSAnswerDetail(t *testing.T) {
 			{Name: []byte("svc.local"), Type: layers.DNSTypeA, TTL: 30, IP: net.IP{5, 6, 7, 8}},
 		},
 	}
-	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50000}, resp)
+	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50000}, resp, []byte("raw-response-bytes"))
 
 	got := drain(s)
 	if len(got) != 1 {
@@ -536,6 +537,13 @@ func TestDNSAnswerDetail(t *testing.T) {
 	if a := e.Response.DNS.Answers; len(a) != 2 || a[0].Data != "1.2.3.4" || a[1].Data != "5.6.7.8" {
 		t.Errorf("answers = %+v", e.Response.DNS.Answers)
 	}
+	// Raw tab coverage (previously DNS never populated Raw at all).
+	if e.Request.Raw == nil || e.Request.Raw.Bytes != len("raw-query-bytes") {
+		t.Errorf("request raw = %+v, want a populated RawView over the query bytes", e.Request.Raw)
+	}
+	if e.Response.Raw == nil || e.Response.Raw.Bytes != len("raw-response-bytes") {
+		t.Errorf("response raw = %+v, want a populated RawView over the response bytes", e.Response.Raw)
+	}
 }
 
 func TestDNSNXDomainDetail(t *testing.T) {
@@ -544,7 +552,7 @@ func TestDNSNXDomainDetail(t *testing.T) {
 	reqNet, _, respNet, _ := flows(50001, 53)
 
 	q := &layers.DNS{ID: 8, Questions: []layers.DNSQuestion{{Name: []byte("nope.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}}
-	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50001, DstPort: 53}, q)
+	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50001, DstPort: 53}, q, nil)
 
 	resp := &layers.DNS{
 		ID: 8, QR: true, RA: true, ResponseCode: layers.DNSResponseCodeNXDomain,
@@ -552,7 +560,7 @@ func TestDNSNXDomainDetail(t *testing.T) {
 			{Name: []byte("local"), Type: layers.DNSTypeSOA, TTL: 30, SOA: layers.DNSSOA{MName: []byte("ns.local"), RName: []byte("hostmaster.local")}},
 		},
 	}
-	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50001}, resp)
+	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50001}, resp, nil)
 
 	got := drain(s)
 	if len(got) != 1 {
@@ -756,5 +764,34 @@ func TestPostgresSSLPreferDoubleUntyped(t *testing.T) {
 	got := drain(s)
 	if len(got) != 1 || got[0].Request.Query != "SELECT 1" {
 		t.Fatalf("expected 1 paired SELECT after skipping both untyped msgs, got %d: %+v", len(got), got)
+	}
+}
+
+// --- HTTP ---------------------------------------------------------------
+
+// TTFBMs must measure request-sent -> response-first-byte, distinct from (and
+// smaller than) the total ElapsedMs — a real gap between the two consumeHTTP
+// calls proves it's an actual duration, not a dead always-zero field.
+func TestHTTPTTFB(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40200, 80)
+
+	p.consumeHTTP(rNet, rTr, strings.NewReader("GET /x HTTP/1.1\r\nHost: h\r\n\r\n"))
+	time.Sleep(10 * time.Millisecond)
+	p.consumeHTTP(sNet, sTr, strings.NewReader("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].Response.HTTP == nil {
+		t.Fatalf("entry has no Response.HTTP")
+	}
+	if got[0].Response.HTTP.TTFBMs <= 0 {
+		t.Errorf("TTFBMs = %d, want > 0 given a real gap between request and response", got[0].Response.HTTP.TTFBMs)
+	}
+	if got[0].Response.HTTP.TTFBMs > got[0].ElapsedMs {
+		t.Errorf("TTFBMs (%d) should not exceed total ElapsedMs (%d)", got[0].Response.HTTP.TTFBMs, got[0].ElapsedMs)
 	}
 }

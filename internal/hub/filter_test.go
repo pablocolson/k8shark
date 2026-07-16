@@ -62,18 +62,31 @@ func richEntry() *api.Entry {
 		Protocol: api.ProtocolPostgres,
 		Status:   "error",
 		Request: api.Payload{
+			Size:     12,
 			HTTP:     &api.HTTPDetail{Version: "HTTP/2.0", ContentType: "application/grpc"},
-			Redis:    &api.RedisDetail{DBIndex: 3},
-			Postgres: &api.PGDetail{StatementName: "stmt_s1"},
+			Redis:    &api.RedisDetail{DBIndex: 3, PipelineDepth: 2},
+			Postgres: &api.PGDetail{StatementName: "stmt_s1", Portal: "p1"},
 			DNS:      &api.DNSDetail{Questions: []api.DNSQuestion{{Name: "x", Type: "AAAA"}}},
 		},
 		Response: api.Payload{
 			ContentType: "application/json",
-			DNS:         &api.DNSDetail{Rcode: "NXDOMAIN", Answers: []api.DNSRecord{{Data: "1.2.3.4"}}},
-			Redis:       &api.RedisDetail{Reply: "OK"},
-			Postgres:    &api.PGDetail{Error: &api.PGError{Code: "40P01"}, TxStatus: "E"},
+			Size:        99,
+			RowCount:    7,
+			DNS: &api.DNSDetail{
+				Rcode: "NXDOMAIN", Answers: []api.DNSRecord{{Data: "1.2.3.4"}},
+				Authoritative: true, RecursionAvl: true,
+			},
+			Redis:    &api.RedisDetail{Reply: "OK"},
+			Postgres: &api.PGDetail{Error: &api.PGError{Code: "40P01"}, TxStatus: "E"},
+			HTTP:     &api.HTTPDetail{TTFBMs: 42},
 		},
-		L4: &api.L4Info{TTL: 64, Retransmits: 2, MSS: 1460, Window: 64240, RTTMs: 1.5, ClientBytes: 100, TLS: &api.TLSInfo{SNI: "api.example.com"}},
+		L4: &api.L4Info{
+			TTL: 64, Retransmits: 2, MSS: 1460, Window: 64240, RTTMs: 1.5, ClientBytes: 100,
+			SrcMAC: "aa:bb:cc:dd:ee:ff", DstMAC: "11:22:33:44:55:66", IPVersion: 4, IPFlags: "DF",
+			ClientTCPFlags: "SYN,ACK", ServerTCPFlags: "SYN,ACK,FIN", SeqStart: 1000, AckStart: 2000,
+			DurationMs: 250, ClientPackets: 5, ServerPackets: 7,
+			TLS: &api.TLSInfo{SNI: "api.example.com"},
+		},
 	}
 }
 
@@ -102,6 +115,32 @@ func TestCompileFilterRichFields(t *testing.T) {
 		{`tls.sni == "other"`, false},
 		{"api.example.com", true}, // full-text via SNI
 		{"1.2.3.4", true},         // full-text via DNS answer data
+
+		// Previously display-only fields, now filterable.
+		{`redis.pipelinedepth == 2`, true},
+		{`redis.pipelinedepth > 5`, false},
+		{`postgres.portal == "p1"`, true},
+		{`dns.authoritative == "true"`, true},
+		{`dns.recursionavailable == "true"`, true},
+		{`dns.recursionavl == "true"`, true},
+		{`request.size == 12`, true},
+		{`response.size > 50`, true},
+		{`postgres.rowcount == 7`, true},
+		{`rowcount == 7`, true},
+		{`http.ttfbms == 42`, true},
+
+		// Remaining L4Info fields.
+		{`l4.srcmac == "aa:bb:cc:dd:ee:ff"`, true},
+		{`l4.dstmac contains "55:66"`, true},
+		{`l4.ipversion == 4`, true},
+		{`l4.ipflags == "DF"`, true},
+		{`l4.clienttcpflags contains "SYN"`, true},
+		{`l4.servertcpflags == "SYN,ACK,FIN"`, true},
+		{`l4.seqstart == 1000`, true},
+		{`l4.ackstart == 2000`, true},
+		{`l4.durationms >= 250`, true},
+		{`l4.clientpackets == 5`, true},
+		{`l4.serverpackets == 7`, true},
 	}
 	for _, c := range cases {
 		pred, err := CompileFilter(c.expr)

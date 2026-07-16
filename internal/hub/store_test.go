@@ -33,6 +33,49 @@ func TestStoreGetByID(t *testing.T) {
 	}
 }
 
+func TestStoreRecentBefore(t *testing.T) {
+	s := newStore(10)
+	for i := 0; i < 5; i++ {
+		s.add(&api.Entry{ID: fmt.Sprintf("e%d", i), Protocol: api.ProtocolHTTP, Timestamp: time.Now()})
+	}
+	// Buffer holds e0..e4, newest (e4) first. Paging before e2 should yield
+	// e1 then e0 — the entries strictly older than the anchor.
+	got := s.recentBefore("e2", 10, nil)
+	if len(got) != 2 || got[0].ID != "e1" || got[1].ID != "e0" {
+		t.Fatalf("recentBefore(e2) = %v, want [e1 e0]", ids(got))
+	}
+
+	// Paging before the oldest entry yields nothing.
+	if got := s.recentBefore("e0", 10, nil); len(got) != 0 {
+		t.Fatalf("recentBefore(e0) = %v, want empty", ids(got))
+	}
+
+	// An anchor that isn't in the buffer (aged out or never existed) is a
+	// safe no-op rather than a guess.
+	if got := s.recentBefore("missing", 10, nil); len(got) != 0 {
+		t.Fatalf("recentBefore(missing) = %v, want empty", ids(got))
+	}
+
+	// limit is respected.
+	if got := s.recentBefore("e4", 1, nil); len(got) != 1 || got[0].ID != "e3" {
+		t.Fatalf("recentBefore(e4, limit=1) = %v, want [e3]", ids(got))
+	}
+
+	// match filters the paged results too.
+	onlyE0 := func(e *api.Entry) bool { return e.ID == "e0" }
+	if got := s.recentBefore("e2", 10, onlyE0); len(got) != 1 || got[0].ID != "e0" {
+		t.Fatalf("recentBefore(e2, match=e0) = %v, want [e0]", ids(got))
+	}
+}
+
+func ids(es []*api.Entry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.ID
+	}
+	return out
+}
+
 // Trailing windows: only entries inside 1m/5m count, and errors are tallied.
 func TestStoreWindowStats(t *testing.T) {
 	s := newStore(16)

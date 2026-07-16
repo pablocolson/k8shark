@@ -113,6 +113,40 @@ func (s *store) recent(limit int, match func(*api.Entry) bool) []*api.Entry {
 	return out
 }
 
+// recentBefore returns up to limit entries strictly older than beforeID,
+// newest first, satisfying match — the walk-back that powers "load older"
+// pagination beyond what the WS replay/live buffer already surfaced. If
+// beforeID isn't found in the ring buffer (aged out), it returns no results
+// rather than guessing, since there's no reliable anchor for "older than".
+func (s *store) recentBefore(beforeID string, limit int, match func(*api.Entry) bool) []*api.Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*api.Entry, 0, limit)
+	n := s.capacity
+	if !s.full {
+		n = s.next
+	}
+	skipping := true
+	for i := 0; i < n && len(out) < limit; i++ {
+		idx := (s.next - 1 - i + s.capacity) % s.capacity
+		e := s.buf[idx]
+		if e == nil {
+			continue
+		}
+		if skipping {
+			if e.ID == beforeID {
+				skipping = false
+			}
+			continue
+		}
+		if match == nil || match(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // get returns the entry with the given id, or nil. O(1) via the byID index.
 func (s *store) get(id string) *api.Entry {
 	s.mu.RLock()

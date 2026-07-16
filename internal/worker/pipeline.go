@@ -176,7 +176,11 @@ const (
 // response onto the wrong request for the rest of the connection, with no way
 // to resync. The protocols dissected here are all strictly request-ordered per
 // connection, so in the common lossless case FIFO is exact.
-func (p *pipeline) completeResponse(key string, resp api.Payload, statusCode int, status string) {
+//
+// firstByteTime is when the response's first byte was observed on the wire
+// (used only to fill HTTPDetail.TTFBMs); pass the zero time.Time for
+// protocols that don't populate resp.HTTP.
+func (p *pipeline) completeResponse(key string, resp api.Payload, statusCode int, status string, firstByteTime time.Time) {
 	var pr *pendingReq
 	for attempt := 0; ; attempt++ {
 		p.mu.Lock()
@@ -192,6 +196,10 @@ func (p *pipeline) completeResponse(key string, resp api.Payload, statusCode int
 			return // no request to pair with (capture started mid-connection)
 		}
 		time.Sleep(completeResponsePairDelay)
+	}
+
+	if resp.HTTP != nil && !firstByteTime.IsZero() {
+		resp.HTTP.TTFBMs = firstByteTime.Sub(pr.ts).Milliseconds()
 	}
 
 	now := time.Now()
@@ -294,6 +302,14 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 	if string(peek) == "HTTP/" {
 		// Server -> client: a stream of responses.
 		for {
+			// Peek(1) blocks until the response's first byte is actually on
+			// the wire without consuming it, so this timestamp reflects
+			// first-byte arrival rather than whenever ReadResponse happens
+			// to finish parsing headers.
+			if _, err := br.Peek(1); err != nil {
+				return
+			}
+			firstByte := time.Now()
 			resp, err := http.ReadResponse(br, nil)
 			if err != nil {
 				return
@@ -310,7 +326,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 				Raw:         rawOf(cr),
 				HTTP:        &api.HTTPDetail{Version: resp.Proto, ContentType: ct},
 				Summary:     strconv.Itoa(resp.StatusCode) + " " + http.StatusText(resp.StatusCode),
-			}, resp.StatusCode, classifyHTTP(resp.StatusCode))
+			}, resp.StatusCode, classifyHTTP(resp.StatusCode), firstByte)
 		}
 	}
 	// Client -> server: a stream of requests.
@@ -346,10 +362,14 @@ type dnsPending struct {
 	id        int
 	src, dst  api.Endpoint
 	ts        time.Time
+	raw       *api.RawView
 }
 
-// handleDNS processes a single UDP packet that carries a DNS layer.
-func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers.DNS) {
+// handleDNS processes a single UDP packet that carries a DNS layer. raw is
+// the undecoded DNS message bytes (gopacket Layer.LayerContents()) for the
+// Raw tab — DNS has no bufio.Reader-based capture path like the TCP
+// dissectors, so it's captured directly from the packet layer instead.
+func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers.DNS, raw []byte) {
 	srcIP, dstIP := netFlow.Src().String(), netFlow.Dst().String()
 	if !dns.QR {
 		// Query
@@ -365,6 +385,7 @@ func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers
 			src:       api.Endpoint{IP: srcIP, Port: int(udp.SrcPort)},
 			dst:       api.Endpoint{IP: dstIP, Port: int(udp.DstPort), Name: "dns"},
 			ts:        time.Now(),
+			raw:       rawViewFromBytes(raw, p.rawCap),
 		}
 		p.mu.Unlock()
 		return
@@ -403,8 +424,8 @@ func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers
 		Node:        p.node,
 		Source:      pend.src,
 		Destination: pend.dst,
-		Request:     api.Payload{Question: pend.question, Summary: "A? " + pend.question, DNS: reqDetail},
-		Response:    api.Payload{Answer: answer, Summary: dnsRcode(dns.ResponseCode), DNS: respDetail},
+		Request:     api.Payload{Question: pend.question, Summary: "A? " + pend.question, DNS: reqDetail, Raw: pend.raw},
+		Response:    api.Payload{Answer: answer, Summary: dnsRcode(dns.ResponseCode), DNS: respDetail, Raw: rawViewFromBytes(raw, p.rawCap)},
 		Status:      dnsStatus(dns.ResponseCode),
 	})
 }
@@ -546,6 +567,25 @@ func rawOf(cr *capReader) *api.RawView {
 		return nil
 	}
 	return cr.raw()
+}
+
+// rawViewFromBytes builds a RawView from a single already-available byte
+// slice — for capture paths with no bufio.Reader to tee (DNS, generic L4/ICMP
+// flows), unlike the streaming capReader above. Returns nil when raw capture
+// is disabled (cap < 0) or b is empty.
+func rawViewFromBytes(b []byte, cap int) *api.RawView {
+	if cap < 0 || len(b) == 0 {
+		return nil
+	}
+	limit := len(b)
+	if limit > cap {
+		limit = cap
+	}
+	return &api.RawView{
+		Hex:       hexDump(b[:limit], limit),
+		Bytes:     len(b),
+		Truncated: len(b) > limit,
+	}
 }
 
 // parseQuery renders a URL's query parameters as a flat map (nil if none).

@@ -176,13 +176,21 @@ export interface Stats {
   workers: number;
   byProtocol: Record<string, number>;
   byStatus: Record<string, number>;
+  broadcastDropped: number;
+}
+
+export interface StatsPoint {
+  timestamp: string;
+  entriesPerSec: number;
+  totalEntries: number;
 }
 
 export interface Envelope {
-  type: "entry" | "stats" | "hello" | "filter";
+  type: "entry" | "stats" | "hello" | "filter" | "filterError";
   entry?: Entry;
   stats?: Stats;
   filter?: string;
+  error?: string;
 }
 
 // --- IFL autocomplete (field catalog) ---------------------------------------

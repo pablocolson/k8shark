@@ -43,6 +43,44 @@ type flowState struct {
 	haveSeqClient, haveSeqServer bool
 	clientBytes, serverBytes     int64
 	clientPackets, serverPackets int64
+
+	// rawBuf samples this flow's payload bytes (either direction, up to
+	// rawCap total — there's no clean request/response split to preserve
+	// separately for an undissected flow) for the Raw tab. rawTotal tracks
+	// how much payload was actually seen, for the truncated flag.
+	rawBuf   []byte
+	rawTotal int
+}
+
+// rawView renders the flow's sampled payload as a RawView, or nil if none
+// was captured (raw capture disabled, or a flow with no payload bytes, e.g.
+// a bare SYN/FIN handshake).
+func (f *flowState) rawView() *api.RawView {
+	if len(f.rawBuf) == 0 {
+		return nil
+	}
+	return &api.RawView{
+		Hex:       hexDump(f.rawBuf, len(f.rawBuf)),
+		Bytes:     f.rawTotal,
+		Truncated: f.rawTotal > len(f.rawBuf),
+	}
+}
+
+// captureRaw appends up to rawCap total bytes of payload into f.rawBuf,
+// tracking the true total in rawTotal regardless of the cap. No-op once
+// disabled (rawCap < 0) or the cap is already reached.
+func (f *flowState) captureRaw(payload []byte, rawCap int) {
+	if len(payload) == 0 || rawCap < 0 {
+		return
+	}
+	f.rawTotal += len(payload)
+	if room := rawCap - len(f.rawBuf); room > 0 {
+		take := len(payload)
+		if take > room {
+			take = room
+		}
+		f.rawBuf = append(f.rawBuf, payload[:take]...)
+	}
 }
 
 func (f *flowState) flagStr() string {
@@ -106,6 +144,7 @@ func (p *pipeline) trackTCP(netFlow, transport gopacket.Flow, tcp *layers.TCP, l
 	f.lastSeen = ts
 	f.packets++
 	f.bytes += int64(length)
+	f.captureRaw(tcp.Payload, p.rawCap)
 
 	// Copy the L3 header fields once (from whichever direction is seen first).
 	if f.srcMAC == "" && meta.srcMAC != "" {
@@ -232,7 +271,7 @@ func (p *pipeline) snapshotL4(key string) *api.L4Info {
 
 // trackUDP accounts one non-DNS UDP packet. UDP has no close signal, so these
 // flows are emitted only by flushFlows on idle.
-func (p *pipeline) trackUDP(netFlow, transport gopacket.Flow, length int, ts time.Time) {
+func (p *pipeline) trackUDP(netFlow, transport gopacket.Flow, length int, ts time.Time, payload []byte) {
 	key := connKey(netFlow, transport)
 	p.flowMu.Lock()
 	f := p.flows[key]
@@ -243,6 +282,7 @@ func (p *pipeline) trackUDP(netFlow, transport gopacket.Flow, length int, ts tim
 	f.lastSeen = ts
 	f.packets++
 	f.bytes += int64(length)
+	f.captureRaw(payload, p.rawCap)
 	p.flowMu.Unlock()
 }
 
@@ -256,7 +296,7 @@ func (p *pipeline) handleICMP(netFlow gopacket.Flow, icmp *layers.ICMPv4, length
 		Node:        p.node,
 		Source:      api.Endpoint{IP: netFlow.Src().String()},
 		Destination: api.Endpoint{IP: netFlow.Dst().String()},
-		Request:     api.Payload{Summary: desc, Bytes: int64(length)},
+		Request:     api.Payload{Summary: desc, Bytes: int64(length), Raw: rawViewFromBytes(icmp.Payload, p.rawCap)},
 		Response:    api.Payload{Summary: desc},
 		Status:      status,
 	})
@@ -299,7 +339,7 @@ func (p *pipeline) emitFlow(f *flowState, reason string) {
 		Node:        p.node,
 		Source:      f.src,
 		Destination: f.dst,
-		Request:     api.Payload{Summary: flowLabel(f), Packets: f.packets, Bytes: f.bytes, Flags: f.flagStr()},
+		Request:     api.Payload{Summary: flowLabel(f), Packets: f.packets, Bytes: f.bytes, Flags: f.flagStr(), Raw: f.rawView()},
 		Response:    api.Payload{Summary: reason + " · " + humanBytes(f.bytes) + " · " + strconv.FormatInt(f.packets, 10) + " pkts"},
 		Status:      status,
 		L4:          buildL4Info(f),
