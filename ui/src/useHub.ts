@@ -8,6 +8,11 @@ const BACKOFF_BASE = 1000;
 const BACKOFF_FACTOR = 2;
 const BACKOFF_MAX = 15000;
 
+// Flush cadence used in place of requestAnimationFrame while the document is
+// hidden. Browsers throttle background setTimeout (typically to ~1/s) but,
+// unlike rAF, never fully suspend it — see the comment on scheduleFlush.
+const HIDDEN_FLUSH_INTERVAL_MS = 250;
+
 // wsURL builds the hub WebSocket URL from the current origin. Works behind
 // nginx (in-cluster) and behind the vite dev proxy (local).
 function wsURL(filter: string): string {
@@ -49,12 +54,29 @@ export function useHub(initialFilter: string): HubState {
 
   // Coalesce arriving entries: buffer them and flush to state once per animation
   // frame so a burst of messages triggers a single re-render, not one per entry.
+  //
+  // Chromium-family browsers fully suspend requestAnimationFrame callbacks for a
+  // hidden document (backgrounded tab/window) rather than merely throttling them.
+  // If a flush were scheduled via rAF right as the tab goes hidden, it would never
+  // fire: frameRef.current stays non-null, scheduleFlush's guard keeps early-
+  // returning, and entries pile up in bufRef unflushed for as long as the tab
+  // stays hidden. setTimeout is throttled but not suspended in the background
+  // (browsers cap it to ~1/s), so we fall back to it whenever the document isn't
+  // visible and switch back to rAF once it is.
   const bufRef = useRef<Entry[]>([]);
   const frameRef = useRef<number | null>(null);
+  const frameKindRef = useRef<"raf" | "timeout">("raf");
+
+  const cancelScheduledFlush = useCallback(() => {
+    if (frameRef.current === null) return;
+    if (frameKindRef.current === "raf") cancelAnimationFrame(frameRef.current);
+    else clearTimeout(frameRef.current);
+    frameRef.current = null;
+  }, []);
 
   const scheduleFlush = useCallback(() => {
     if (frameRef.current !== null) return;
-    frameRef.current = requestAnimationFrame(() => {
+    const flush = () => {
       frameRef.current = null;
       const buf = bufRef.current;
       if (buf.length === 0) return;
@@ -65,7 +87,14 @@ export function useHub(initialFilter: string): HubState {
         if (next.length > MAX_ENTRIES) next.length = MAX_ENTRIES;
         return next;
       });
-    });
+    };
+    if (document.visibilityState === "hidden") {
+      frameKindRef.current = "timeout";
+      frameRef.current = setTimeout(flush, HIDDEN_FLUSH_INTERVAL_MS) as unknown as number;
+    } else {
+      frameKindRef.current = "raf";
+      frameRef.current = requestAnimationFrame(flush);
+    }
   }, []);
 
   const connect = useCallback((filter: string) => {
@@ -112,12 +141,30 @@ export function useHub(initialFilter: string): HubState {
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close();
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
+      cancelScheduledFlush();
     };
-  }, [connect]);
+  }, [connect, cancelScheduledFlush]);
+
+  // Keep the scheduled flush mechanism matched to the current visibility
+  // state, in both directions: a timeout fallback still pending after the tab
+  // comes back to the foreground shouldn't make the user wait out the rest of
+  // its (throttled, up to ~1s) interval, and — symmetrically — a rAF still
+  // pending right as the tab goes to the background must be migrated to the
+  // timeout fallback, since that rAF may never fire once hidden (the whole
+  // reason scheduleFlush avoids rAF while hidden in the first place). Either
+  // way, cancel and reschedule immediately rather than leaving a stale/stuck
+  // timer in place.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (frameRef.current === null) return;
+      const wantKind = document.visibilityState === "hidden" ? "timeout" : "raf";
+      if (frameKindRef.current === wantKind) return;
+      cancelScheduledFlush();
+      scheduleFlush();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [cancelScheduledFlush, scheduleFlush]);
 
   const applyFilter = useCallback((f: string) => {
     filterRef.current = f;
