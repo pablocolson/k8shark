@@ -33,34 +33,36 @@
   --map-legend-bg: rgba(19, 24, 38, 0.85);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f4f6f9;
-    --bg-2: #eaeef3;
-    --bg-3: #dfe4ec;
-    --panel: #ffffff;
-    --border: #d3d9e2;
-    --text: #1a2233;
-    --text-dim: #48526a;
-    /* ~5:1 against --bg, same AA-safe treatment as the dark theme above. */
-    --text-faint: #5f6b82;
-    --accent: #1868c9;
-    --ok: #16875a;
-    --warn: #a15e00;
-    --err: #c73535;
+/* Theme is resolved to an explicit data-theme attribute before first paint
+   (see index.html's inline script + useTheme.ts) rather than left to
+   `prefers-color-scheme` alone, so a manual toggle can override the OS
+   setting. */
+:root[data-theme="light"] {
+  --bg: #f4f6f9;
+  --bg-2: #eaeef3;
+  --bg-3: #dfe4ec;
+  --panel: #ffffff;
+  --border: #d3d9e2;
+  --text: #1a2233;
+  --text-dim: #48526a;
+  /* ~5:1 against --bg, same AA-safe treatment as the dark theme above. */
+  --text-faint: #5f6b82;
+  --accent: #1868c9;
+  --ok: #16875a;
+  --warn: #a15e00;
+  --err: #c73535;
 
-    --header-grad-1: #eef2f7;
-    --header-grad-2: #e4e9f0;
-    --chip-bg: #eef1f6;
-    --hover-bg: #e2e7ef;
-    --suggest-hover-bg: #e8ecf3;
-    --row-hover-bg: #eef2f7;
-    --row-sel-bg: #dbe7fa;
-    --scrollbar-thumb: #c3cad6;
-    --map-node-fill: #ffffff;
-    --map-edge-default: #b7bfcc;
-    --map-legend-bg: rgba(255, 255, 255, 0.9);
-  }
+  --header-grad-1: #eef2f7;
+  --header-grad-2: #e4e9f0;
+  --chip-bg: #eef1f6;
+  --hover-bg: #e2e7ef;
+  --suggest-hover-bg: #e8ecf3;
+  --row-hover-bg: #eef2f7;
+  --row-sel-bg: #dbe7fa;
+  --scrollbar-thumb: #c3cad6;
+  --map-node-fill: #ffffff;
+  --map-edge-default: #b7bfcc;
+  --map-legend-bg: rgba(255, 255, 255, 0.9);
 }
 
 * { box-sizing: border-box; }
@@ -141,6 +143,8 @@ body {
 .apply-btn:hover { filter: brightness(1.1); }
 .icon-btn { background: transparent; border: none; color: var(--text-faint); cursor: pointer; font-size: 13px; }
 .icon-btn:hover { color: var(--text); }
+.theme-toggle { font-size: 16px; line-height: 1; padding: 2px; border-radius: 6px; }
+.theme-toggle:hover { background: var(--hover-bg); }
 
 /* ---------- IFL autocomplete dropdown ---------- */
 .suggest {

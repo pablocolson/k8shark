@@ -1,6 +1,7 @@
 import type { Stats, StatsPoint } from "../types";
 import { PROTO_COLORS } from "../constants";
 import { Sparkline } from "./Sparkline";
+import { useTheme } from "../useTheme";
 
 const STATUS_ORDER = ["success", "warning", "error"] as const;
 
@@ -17,6 +18,8 @@ export function StatsHeader({
   onProtoClick?: (proto: string) => void;
   activeProto?: string | null;
 }) {
+  const { theme, toggleTheme } = useTheme();
+
   return (
     <header className="header">
       <div className="brand">
@@ -75,6 +78,16 @@ export function StatsHeader({
         <span className="conn-dot" />
         {connected ? "live" : "reconnecting…"}
       </div>
+
+      <button
+        type="button"
+        className="icon-btn theme-toggle"
+        onClick={toggleTheme}
+        title={theme === "dark" ? "switch to light mode" : "switch to dark mode"}
+        aria-label={theme === "dark" ? "switch to light mode" : "switch to dark mode"}
+      >
+        {theme === "dark" ? "☀️" : "🌙"}
+      </button>
     </header>
   );
 }

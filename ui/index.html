@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>k8shark</title>
+    <script>
+      // Resolve the theme before first paint (localStorage choice, falling
+      // back to the OS preference) so there's no flash of the wrong theme
+      // while the bundle loads. Kept in sync with ui/src/useTheme.ts.
+      (function () {
+        var stored = localStorage.getItem("k8shark.theme");
+        var theme =
+          stored === "light" || stored === "dark"
+            ? stored
+            : window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
