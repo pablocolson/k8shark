@@ -151,13 +151,18 @@ export function FilterSuggest({ ctx, byName, items, hint, highlightIndex, onPick
   };
 
   return (
-    <div className="suggest">
+    <div className="suggest" role="listbox" id="filter-suggest-listbox">
       {items.length === 0 && hint ? (
-        <div className="suggest-item suggest-hint">{hint}</div>
+        <div className="suggest-item suggest-hint" role="presentation">
+          {hint}
+        </div>
       ) : (
         items.map((item, i) => (
           <div
             key={`${item.insertText}-${i}`}
+            id={`filter-suggest-opt-${i}`}
+            role="option"
+            aria-selected={i === highlightIndex}
             className={`suggest-item${i === highlightIndex ? " active" : ""}`}
             onMouseDown={(e) => {
               // mousedown (not click) fires before the input's blur handler,

@@ -212,6 +212,11 @@ func genEntry(rnd *rand.Rand, node string, seq int64) *api.Entry {
 			Raw:         demoRaw(method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: k8shark-demo/1.0\r\nAccept: application/json\r\n\r\n"),
 		}
 		body := demoJSONBody(code)
+		// TTFB is modeled as the bulk of the total latency (headers/status-line
+		// dominate for these small JSON bodies), leaving a smaller random tail
+		// for body transfer — there's no real request/response gap to measure
+		// in synthetic traffic, unlike the real dissectors.
+		ttfb := elapsed/2 + int64(rnd.Intn(int(elapsed/2)+1))
 		e.Response = api.Payload{
 			StatusCode:  code,
 			Summary:     strconv.Itoa(code) + " " + statusText(code),
@@ -219,7 +224,7 @@ func genEntry(rnd *rand.Rand, node string, seq int64) *api.Entry {
 			ContentType: "application/json",
 			Body:        body,
 			Size:        len(body),
-			HTTP:        &api.HTTPDetail{Version: "HTTP/1.1", ContentType: "application/json"},
+			HTTP:        &api.HTTPDetail{Version: "HTTP/1.1", ContentType: "application/json", TTFBMs: ttfb},
 			Raw:         demoRaw("HTTP/1.1 " + strconv.Itoa(code) + " " + statusText(code) + "\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body),
 		}
 		e.StatusCode = code

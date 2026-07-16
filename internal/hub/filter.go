@@ -469,6 +469,98 @@ func fieldGetter(field string) func(*api.Entry) string {
 			return ""
 		}
 
+	// --- previously display-only fields, now filterable too ----------------
+	case "redis.pipelinedepth":
+		return func(e *api.Entry) string {
+			if e.Request.Redis != nil {
+				return strconv.Itoa(e.Request.Redis.PipelineDepth)
+			}
+			return ""
+		}
+	case "postgres.portal":
+		return func(e *api.Entry) string {
+			if e.Request.Postgres != nil {
+				return e.Request.Postgres.Portal
+			}
+			return ""
+		}
+	case "dns.authoritative":
+		return func(e *api.Entry) string {
+			if e.Response.DNS != nil {
+				return strconv.FormatBool(e.Response.DNS.Authoritative)
+			}
+			return ""
+		}
+	case "dns.recursionavailable", "dns.recursionavl":
+		return func(e *api.Entry) string {
+			if e.Response.DNS != nil {
+				return strconv.FormatBool(e.Response.DNS.RecursionAvl)
+			}
+			return ""
+		}
+	case "request.size":
+		return func(e *api.Entry) string { return strconv.Itoa(e.Request.Size) }
+	case "response.size", "size":
+		return func(e *api.Entry) string { return strconv.Itoa(e.Response.Size) }
+	case "postgres.rowcount", "rowcount":
+		return func(e *api.Entry) string { return strconv.Itoa(e.Response.RowCount) }
+	case "http.ttfbms":
+		return func(e *api.Entry) string {
+			if e.Response.HTTP != nil {
+				return strconv.FormatInt(e.Response.HTTP.TTFBMs, 10)
+			}
+			return ""
+		}
+
+	// --- remaining L4Info fields (previously view-only) ---------------------
+	case "l4.srcmac":
+		return func(e *api.Entry) string { return l4Str(e, func(l *api.L4Info) string { return l.SrcMAC }) }
+	case "l4.dstmac":
+		return func(e *api.Entry) string { return l4Str(e, func(l *api.L4Info) string { return l.DstMAC }) }
+	case "l4.ipversion":
+		return func(e *api.Entry) string { return l4Int(e, func(l *api.L4Info) int { return l.IPVersion }) }
+	case "l4.ipflags":
+		return func(e *api.Entry) string { return l4Str(e, func(l *api.L4Info) string { return l.IPFlags }) }
+	case "l4.clienttcpflags":
+		return func(e *api.Entry) string { return l4Str(e, func(l *api.L4Info) string { return l.ClientTCPFlags }) }
+	case "l4.servertcpflags":
+		return func(e *api.Entry) string { return l4Str(e, func(l *api.L4Info) string { return l.ServerTCPFlags }) }
+	case "l4.seqstart":
+		return func(e *api.Entry) string {
+			if e.L4 == nil {
+				return ""
+			}
+			return strconv.FormatUint(uint64(e.L4.SeqStart), 10)
+		}
+	case "l4.ackstart":
+		return func(e *api.Entry) string {
+			if e.L4 == nil {
+				return ""
+			}
+			return strconv.FormatUint(uint64(e.L4.AckStart), 10)
+		}
+	case "l4.durationms":
+		return func(e *api.Entry) string {
+			if e.L4 == nil {
+				return ""
+			}
+			return strconv.FormatInt(e.L4.DurationMs, 10)
+		}
+	case "l4.clientpackets":
+		return func(e *api.Entry) string {
+			if e.L4 == nil {
+				return ""
+			}
+			return strconv.FormatInt(e.L4.ClientPackets, 10)
+		}
+	case "l4.serverpackets":
+		return func(e *api.Entry) string {
+			if e.L4 == nil {
+				return ""
+			}
+			return strconv.FormatInt(e.L4.ServerPackets, 10)
+		}
+
 	default:
 		return func(*api.Entry) string { return "" }
 	}
@@ -481,6 +573,14 @@ func l4Int(e *api.Entry, get func(*api.L4Info) int) string {
 		return ""
 	}
 	return strconv.Itoa(get(e.L4))
+}
+
+// l4Str reads a string field off e.L4, returning "" when L4 is absent.
+func l4Str(e *api.Entry, get func(*api.L4Info) string) string {
+	if e.L4 == nil {
+		return ""
+	}
+	return get(e.L4)
 }
 
 // fulltext builds a lowercase haystack of an entry's salient fields for bare

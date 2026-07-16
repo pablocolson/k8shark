@@ -2,6 +2,9 @@ import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { contextAt } from "../filterParse";
 import { useFields } from "../useFields";
+import { MAX_ENTRIES } from "../useHub";
+import { downloadFile, entriesToCSV, entriesToJSON } from "../export";
+import type { Entry } from "../types";
 import { FilterSuggest, pickInsertion, useSuggestItems } from "./FilterSuggest";
 
 const EXAMPLES = [
@@ -17,22 +20,30 @@ interface Props {
   value: string;
   onApply: (f: string) => void;
   paused: boolean;
+  pausedCount: number;
   onTogglePause: () => void;
   onClear: () => void;
   view: "list" | "map";
   onViewChange: (v: "list" | "map") => void;
   count: number;
+  truncated: boolean;
+  filterError: string | null;
+  entries: Entry[];
 }
 
 export function FilterBar({
   value,
   onApply,
   paused,
+  pausedCount,
   onTogglePause,
   onClear,
   view,
   onViewChange,
   count,
+  truncated,
+  filterError,
+  entries,
 }: Props) {
   const [draft, setDraft] = useState(value);
   const [caret, setCaret] = useState(value.length);
@@ -128,9 +139,16 @@ export function FilterBar({
       >
         <span className="filter-prompt">ifl›</span>
         <input
+          id="filter-input"
           ref={inputRef}
           className="filter-input"
           placeholder='filter, e.g.  response.status >= 500 and dst.name == "checkout"'
+          aria-label="IFL filter expression"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-controls="filter-suggest-listbox"
+          aria-activedescendant={open && items[highlightIndex] ? `filter-suggest-opt-${highlightIndex}` : undefined}
           value={draft}
           spellCheck={false}
           onChange={(e) => {
@@ -164,10 +182,14 @@ export function FilterBar({
         </button>
       </form>
 
+      {filterError && <div className="filter-error">invalid filter: {filterError}</div>}
+
       <div className="filter-actions">
-        <span className="count">{count} shown</span>
+        <span className="count">
+          {count} shown{truncated ? ` · showing latest ${MAX_ENTRIES}` : ""}
+        </span>
         <button className={`toggle ${paused ? "active" : ""}`} onClick={onTogglePause}>
-          {paused ? "▶ Resume" : "⏸ Pause"}
+          {paused ? `▶ Resume${pausedCount > 0 ? ` (${pausedCount} new)` : ""}` : "⏸ Pause"}
         </button>
         <button className="toggle" onClick={onClear}>
           Clear
@@ -180,6 +202,7 @@ export function FilterBar({
             Map
           </button>
         </div>
+        <ExportMenu entries={entries} />
       </div>
 
       <div className="examples">
@@ -189,6 +212,59 @@ export function FilterBar({
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ExportMenu downloads the entries currently loaded client-side (i.e.
+// whatever the live/filtered buffer holds right now) as JSON or CSV. Purely
+// local — a Blob built from data already in the page, no server round trip.
+function ExportMenu({ entries }: { entries: Entry[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (ev: MouseEvent) => {
+      if (ref.current && !ref.current.contains(ev.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  const doExport = (format: "json" | "csv") => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (format === "json") {
+      downloadFile(entriesToJSON(entries), `k8shark-entries-${stamp}.json`, "application/json");
+    } else {
+      downloadFile(entriesToCSV(entries), `k8shark-entries-${stamp}.csv`, "text/csv");
+    }
+    setOpen(false);
+  };
+
+  return (
+    <div className="col-picker" ref={ref}>
+      <button
+        type="button"
+        className="toggle"
+        onClick={() => setOpen((o) => !o)}
+        disabled={entries.length === 0}
+        aria-expanded={open}
+        aria-haspopup="true"
+        title={entries.length === 0 ? "no entries to export yet" : `export ${entries.length} shown entries`}
+      >
+        export ▾
+      </button>
+      {open && (
+        <div className="col-picker-menu" role="menu">
+          <button type="button" className="col-picker-item" onClick={() => doExport("json")}>
+            as JSON
+          </button>
+          <button type="button" className="col-picker-item" onClick={() => doExport("csv")}>
+            as CSV
+          </button>
+        </div>
+      )}
     </div>
   );
 }

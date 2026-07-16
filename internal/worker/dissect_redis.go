@@ -101,7 +101,7 @@ func (p *pipeline) consumeRedisID(c connID, r io.Reader, isRequest bool, proto a
 			Size:    len(body),
 			Raw:     rawOf(cr),
 			Redis:   &api.RedisDetail{Reply: reply, ReplyType: respTypeName(v.typ), Attributes: v.attrs},
-		}, 0, status)
+		}, 0, status, time.Time{})
 	}
 }
 

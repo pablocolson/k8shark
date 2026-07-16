@@ -1,24 +1,18 @@
-import type { Stats } from "../types";
+import type { Stats, StatsPoint } from "../types";
+import { PROTO_COLORS } from "../constants";
+import { Sparkline } from "./Sparkline";
 
-const PROTO_COLORS: Record<string, string> = {
-  http: "#4aa8ff",
-  dns: "#b07cff",
-  redis: "#ff6b6b",
-  valkey: "#5a9e6f",
-  postgres: "#22c3dd",
-  amqp: "#ff8c42",
-  tcp: "#7a8699",
-  udp: "#7f9c6c",
-  icmp: "#c98b6a",
-};
+const STATUS_ORDER = ["success", "warning", "error"] as const;
 
 export function StatsHeader({
   stats,
+  statsHistory,
   connected,
   onProtoClick,
   activeProto,
 }: {
   stats: Stats | null;
+  statsHistory: StatsPoint[];
   connected: boolean;
   onProtoClick?: (proto: string) => void;
   activeProto?: string | null;
@@ -35,6 +29,18 @@ export function StatsHeader({
         <Stat label="entries/s" value={stats ? stats.entriesPerSec.toFixed(1) : "—"} />
         <Stat label="workers" value={stats ? String(stats.workers) : "—"} />
       </div>
+
+      <Sparkline points={statsHistory} />
+
+      {stats && (
+        <div className="status-chips">
+          {STATUS_ORDER.filter((s) => stats.byStatus[s]).map((s) => (
+            <span key={s} className={`status-chip st-${s}`}>
+              {fmt(stats.byStatus[s])} {s}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="proto-pills">
         {stats &&
@@ -55,6 +61,15 @@ export function StatsHeader({
               </button>
             ))}
       </div>
+
+      {!!stats?.broadcastDropped && (
+        <span
+          className="health-warn"
+          title={`${stats.broadcastDropped} entries dropped because this client couldn't keep up with the live stream (send buffer full) since the hub started. Traffic capture itself is unaffected — only this dashboard's view of it fell behind.`}
+        >
+          ⚠ {fmt(stats.broadcastDropped)} dropped
+        </span>
+      )}
 
       <div className={`conn ${connected ? "on" : "off"}`}>
         <span className="conn-dot" />

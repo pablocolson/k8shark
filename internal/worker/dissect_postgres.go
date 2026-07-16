@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/pablocolson/k8shark/pkg/api"
@@ -139,21 +140,21 @@ func (p *pipeline) pgResponses(br *bufio.Reader, cr *capReader, key string) {
 				RowCount: rows,
 				Raw:      rawOf(cr),
 				Postgres: &api.PGDetail{Tag: tag, Columns: cols, TxStatus: txStatus},
-			}, 0, "success")
+			}, 0, "success", time.Time{})
 			rows, cols = 0, nil
 		case 'E': // ErrorResponse
 			p.completeResponse(key, api.Payload{
 				Summary:  pgErrorMessage(payload),
 				Raw:      rawOf(cr),
 				Postgres: &api.PGDetail{Error: pgParseError(payload), TxStatus: txStatus},
-			}, 0, "error")
+			}, 0, "error", time.Time{})
 			rows, cols = 0, nil
 		case 'I': // EmptyQueryResponse
 			p.completeResponse(key, api.Payload{
 				Summary:  "empty query",
 				Raw:      rawOf(cr),
 				Postgres: &api.PGDetail{TxStatus: txStatus},
-			}, 0, "success")
+			}, 0, "success", time.Time{})
 			rows, cols = 0, nil
 		}
 	}

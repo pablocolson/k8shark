@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Entry, Envelope, Stats } from "./types";
+import type { Entry, Envelope, Stats, StatsPoint } from "./types";
 
-const MAX_ENTRIES = 2000;
+export const MAX_ENTRIES = 2000;
+
+// Mirrors the hub's statsHistoryCap (server.go) so the client-side rolling
+// history the front appends to (on top of the hydrated server history) stays
+// bounded the same way.
+const STATS_HISTORY_CAP = 300;
 
 // Reconnect backoff: exponential with jitter, capped, reset on a healthy open.
 const BACKOFF_BASE = 1000;
@@ -21,9 +26,16 @@ export interface HubState {
   stats: Stats | null;
   connected: boolean;
   paused: boolean;
+  pausedCount: number;
   setPaused: (p: boolean) => void;
   clear: () => void;
   applyFilter: (f: string) => void;
+  filterError: string | null;
+  truncated: boolean;
+  loadOlder: () => void;
+  loadingOlder: boolean;
+  noMoreHistory: boolean;
+  statsHistory: StatsPoint[];
 }
 
 // useHub owns the live connection: it streams entries, keeps a bounded rolling
@@ -34,6 +46,21 @@ export function useHub(initialFilter: string): HubState {
   const [stats, setStats] = useState<Stats | null>(null);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
+  // Entries that arrived while paused, dropped rather than buffered — surfaced
+  // as a count so pausing doesn't silently hide how much traffic went by.
+  const [pausedCount, setPausedCount] = useState(0);
+  const [filterError, setFilterError] = useState<string | null>(null);
+  // True once the client-side buffer has evicted an entry for exceeding
+  // MAX_ENTRIES, so the UI can say "showing latest N" instead of implying a
+  // complete result set.
+  const [truncated, setTruncated] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [noMoreHistory, setNoMoreHistory] = useState(false);
+  const [statsHistory, setStatsHistory] = useState<StatsPoint[]>([]);
+  // The effective cap live flushes trim to. Starts at MAX_ENTRIES but is
+  // raised by loadOlder() so a deliberate "load more history" click doesn't
+  // get silently trimmed back away by the next live-traffic flush.
+  const capRef = useRef(MAX_ENTRIES);
 
   // Counter baseline captured on clear(): the header then shows counts "since
   // clear" (server totals minus this) instead of "since hub start". statsRef
@@ -62,7 +89,10 @@ export function useHub(initialFilter: string): HubState {
       setEntries((prev) => {
         // buf holds this frame's entries oldest-first; newest goes to the front.
         const next = buf.reverse().concat(prev);
-        if (next.length > MAX_ENTRIES) next.length = MAX_ENTRIES;
+        if (next.length > capRef.current) {
+          next.length = capRef.current;
+          setTruncated(true);
+        }
         return next;
       });
     });
@@ -98,13 +128,38 @@ export function useHub(initialFilter: string): HubState {
       if (msg.type === "stats" && msg.stats) {
         statsRef.current = msg.stats;
         setStats(msg.stats);
+        const point: StatsPoint = {
+          timestamp: new Date().toISOString(),
+          entriesPerSec: msg.stats.entriesPerSec,
+          totalEntries: msg.stats.totalEntries,
+        };
+        setStatsHistory((prev) => {
+          const next = prev.concat(point);
+          if (next.length > STATS_HISTORY_CAP) next.shift();
+          return next;
+        });
       } else if (msg.type === "entry" && msg.entry) {
-        if (pausedRef.current) return;
+        if (pausedRef.current) {
+          setPausedCount((c) => c + 1);
+          return;
+        }
         bufRef.current.push(msg.entry);
         scheduleFlush();
+      } else if (msg.type === "filterError") {
+        setFilterError(msg.error ?? "invalid filter");
       }
     };
   }, [scheduleFlush]);
+
+  // Hydrate history once from the hub's rolling buffer so a fresh page load
+  // shows a trend immediately instead of an empty sparkline that only fills
+  // in as live "stats" ticks arrive over the next several minutes.
+  useEffect(() => {
+    fetch("/api/stats/history")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((points: StatsPoint[]) => setStatsHistory(points))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     connect(filterRef.current);
@@ -119,8 +174,19 @@ export function useHub(initialFilter: string): HubState {
     };
   }, [connect]);
 
+  // Wraps setPaused so resuming clears the "arrived while paused" count —
+  // otherwise it would keep climbing from the previous pause window.
+  const togglePause = useCallback((p: boolean) => {
+    setPaused(p);
+    if (!p) setPausedCount(0);
+  }, []);
+
   const applyFilter = useCallback((f: string) => {
     filterRef.current = f;
+    setFilterError(null);
+    setTruncated(false);
+    setNoMoreHistory(false);
+    capRef.current = MAX_ENTRIES;
     // The hub does not replay history on a live filter swap, so clear what's shown.
     bufRef.current = [];
     setEntries([]);
@@ -137,15 +203,59 @@ export function useHub(initialFilter: string): HubState {
   const clear = useCallback(() => {
     bufRef.current = [];
     setEntries([]);
+    setTruncated(false);
+    setNoMoreHistory(false);
+    capRef.current = MAX_ENTRIES;
     // Reset the header counters too: snapshot the current totals as the new
     // baseline (workers/rate are live and stay untouched).
     const s = statsRef.current;
     setBaseline(s ? { total: s.totalEntries, byProto: { ...s.byProtocol } } : null);
   }, []);
 
+  // Pages further back than the WS replay/live buffer via the REST history
+  // endpoint, anchored on the oldest entry currently shown. Appended results
+  // don't get MAX_ENTRIES-trimmed away by the next live flush (capRef is
+  // raised to cover them) since the user explicitly asked to see more.
+  const loadOlder = useCallback(() => {
+    const oldest = entries[entries.length - 1];
+    if (!oldest || loadingOlder) return;
+    setLoadingOlder(true);
+    const q = new URLSearchParams({ before: oldest.id, limit: "200" });
+    if (filterRef.current) q.set("filter", filterRef.current);
+    fetch(`/api/entries?${q}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((older: Entry[]) => {
+        if (older.length === 0) {
+          setNoMoreHistory(true);
+          return;
+        }
+        capRef.current += older.length;
+        setEntries((cur) => cur.concat(older));
+      })
+      .catch(() => {
+        // Transient fetch failure — the button just stays clickable to retry.
+      })
+      .finally(() => setLoadingOlder(false));
+  }, [entries, loadingOlder]);
+
   const displayStats = useMemo(() => applyBaseline(stats, baseline), [stats, baseline]);
 
-  return { entries, stats: displayStats, connected, paused, setPaused, clear, applyFilter };
+  return {
+    entries,
+    stats: displayStats,
+    connected,
+    paused,
+    pausedCount,
+    setPaused: togglePause,
+    clear,
+    applyFilter,
+    filterError,
+    truncated,
+    loadOlder,
+    loadingOlder,
+    noMoreHistory,
+    statsHistory,
+  };
 }
 
 interface StatsBaseline {

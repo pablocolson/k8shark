@@ -36,7 +36,15 @@ type Server struct {
 	resolver *resolver // k8s IP -> pod/service name enrichment (no-op off-cluster)
 
 	uiDir string // optional: serve a built front from here (local dev)
+
+	statsHistMu sync.RWMutex
+	statsHist   []api.StatsPoint // rolling throughput history, capped at statsHistoryCap
 }
+
+// statsHistoryCap bounds the rolling stats history: at the statsLoop's 2s
+// sample interval this covers 10 minutes, enough for a "requests/sec" trend
+// sparkline without unbounded growth.
+const statsHistoryCap = 300
 
 // New builds a hub. uiDir, when non-empty, is a directory whose static files
 // are served at "/" (used for local runs; in-cluster the front is a separate
@@ -67,6 +75,7 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/entries", s.handleEntries)
 	mux.HandleFunc("/api/entry/", s.handleEntry)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/stats/history", s.handleStatsHistory)
 	mux.HandleFunc("/api/fields", s.handleFields)
 	mux.HandleFunc("/api/fields/", s.handleFieldValues)
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -175,12 +184,12 @@ func (s *Server) handleFront(w http.ResponseWriter, r *http.Request) {
 		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	})
 
-	pred, err := CompileFilter(r.URL.Query().Get("filter"))
-	if err != nil {
+	pred, filterErr := CompileFilter(r.URL.Query().Get("filter"))
+	if filterErr != nil {
 		// A bad ?filter= must not fall back to nil (which matches everything and
 		// replays the whole firehose); match nothing until the client sends a
 		// valid filter frame.
-		s.log.Debug("front filter compile failed; using match-nothing", "err", err)
+		s.log.Debug("front filter compile failed; using match-nothing", "err", filterErr)
 		pred = func(*api.Entry) bool { return false }
 	}
 	c := &frontClient{
@@ -194,6 +203,12 @@ func (s *Server) handleFront(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	s.log.Debug("front client connected", "remote", r.RemoteAddr)
+
+	if filterErr != nil {
+		if b, err := json.Marshal(api.Envelope{Type: api.MsgFilterError, Error: filterErr.Error()}); err == nil {
+			c.trySend(b)
+		}
+	}
 
 	// Replay recent history that matches the initial filter, then the stats.
 	s.replayHistory(c)
@@ -223,6 +238,9 @@ func (s *Server) frontReader(c *frontClient) {
 		if env.Type == api.MsgFilter {
 			pred, err := CompileFilter(env.Filter)
 			if err != nil {
+				if b, merr := json.Marshal(api.Envelope{Type: api.MsgFilterError, Error: err.Error()}); merr == nil {
+					c.trySend(b)
+				}
 				continue // keep previous filter on parse error
 			}
 			c.mu.Lock()
@@ -322,7 +340,9 @@ func (s *Server) statsLoop() {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		b := s.statsBytes()
+		st := s.statsSnapshot()
+		s.recordStatsPoint(st)
+		b := s.marshalStats(st)
 		s.mu.RLock()
 		for c := range s.frontClients {
 			c.trySend(b)
@@ -331,10 +351,36 @@ func (s *Server) statsLoop() {
 	}
 }
 
-func (s *Server) statsBytes() []byte {
+// statsSnapshot returns the store's aggregate stats plus hub-level counters
+// the store doesn't own (broadcastDropped is tracked on Server, see broadcast).
+func (s *Server) statsSnapshot() api.Stats {
 	st := s.store.stats(int(atomic.LoadInt32(&s.workerCount)))
+	st.BroadcastDropped = atomic.LoadInt64(&s.broadcastDropped)
+	return st
+}
+
+// recordStatsPoint appends one sample to the rolling stats history, trimming
+// the oldest entry once statsHistoryCap is exceeded.
+func (s *Server) recordStatsPoint(st api.Stats) {
+	s.statsHistMu.Lock()
+	s.statsHist = append(s.statsHist, api.StatsPoint{
+		Timestamp:     time.Now(),
+		EntriesPerSec: st.EntriesPerSec,
+		TotalEntries:  st.TotalEntries,
+	})
+	if len(s.statsHist) > statsHistoryCap {
+		s.statsHist = s.statsHist[len(s.statsHist)-statsHistoryCap:]
+	}
+	s.statsHistMu.Unlock()
+}
+
+func (s *Server) marshalStats(st api.Stats) []byte {
 	b, _ := json.Marshal(api.Envelope{Type: api.MsgStats, Stats: &st})
 	return b
+}
+
+func (s *Server) statsBytes() []byte {
+	return s.marshalStats(s.statsSnapshot())
 }
 
 // --- REST ------------------------------------------------------------------
@@ -351,6 +397,10 @@ func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid filter: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if before := r.URL.Query().Get("before"); before != "" {
+		writeJSON(w, s.store.recentBefore(before, limit, pred))
+		return
+	}
 	writeJSON(w, s.store.recent(limit, pred))
 }
 
@@ -365,7 +415,19 @@ func (s *Server) handleEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.store.stats(int(atomic.LoadInt32(&s.workerCount))))
+	writeJSON(w, s.statsSnapshot())
+}
+
+// handleStatsHistory serves the rolling throughput history (one point per
+// statsLoop tick, ~10 minutes at the current 2s interval) so a freshly
+// connected client can render a trend sparkline immediately instead of
+// waiting to accumulate its own samples live.
+func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	s.statsHistMu.RLock()
+	out := make([]api.StatsPoint, len(s.statsHist))
+	copy(out, s.statsHist)
+	s.statsHistMu.RUnlock()
+	writeJSON(w, out)
 }
 
 // handleMetrics emits the hub's self-metrics in Prometheus text exposition

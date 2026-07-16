@@ -193,10 +193,10 @@ func (p *pipeline) route(assembler *tcpassembly.Assembler, pkt gopacket.Packet) 
 		udp, _ := ul.(*layers.UDP)
 		if dl := pkt.Layer(layers.LayerTypeDNS); dl != nil {
 			dns, _ := dl.(*layers.DNS)
-			p.handleDNS(net.NetworkFlow(), udp, dns)
+			p.handleDNS(net.NetworkFlow(), udp, dns, dl.LayerContents())
 			return
 		}
-		p.trackUDP(net.NetworkFlow(), udp.TransportFlow(), length, ts)
+		p.trackUDP(net.NetworkFlow(), udp.TransportFlow(), length, ts, udp.Payload)
 		return
 	}
 	if il := pkt.Layer(layers.LayerTypeICMPv4); il != nil {

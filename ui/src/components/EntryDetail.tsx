@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Entry, L4Info, Payload, PGColumn, RawView } from "../types";
 
 type TabId = "overview" | "request" | "response" | "headers" | "body" | "raw" | "l4";
@@ -7,10 +7,27 @@ type TabId = "overview" | "request" | "response" | "headers" | "body" | "raw" | 
 export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => void }) {
   const tabs = useMemo(() => visibleTabs(entry), [entry]);
   const [tab, setTab] = useState<TabId>("overview");
+  const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
 
   // Reset to Overview when switching entries so we never land on a now-empty tab.
   useEffect(() => setTab("overview"), [entry.id]);
   const active = tabs.includes(tab) ? tab : "overview";
+
+  // Standard tablist keyboard behavior: arrow keys move (and activate, since
+  // these are simple "select on move" tabs), Home/End jump to the ends.
+  const onTabKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const idx = tabs.indexOf(active);
+    let next = -1;
+    if (e.key === "ArrowRight") next = (idx + 1) % tabs.length;
+    else if (e.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const nextTab = tabs[next];
+    setTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
 
   return (
     <aside className="detail">
@@ -35,10 +52,18 @@ export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => v
         <EndpointCard title="destination" ep={entry.dst} />
       </div>
 
-      <div className="tabs">
+      <div className="tabs" role="tablist" aria-label="entry detail sections" onKeyDown={onTabKeyDown}>
         {tabs.map((t) => (
           <button
             key={t}
+            ref={(el) => {
+              tabRefs.current[t] = el;
+            }}
+            id={`tab-${t}`}
+            role="tab"
+            aria-selected={t === active}
+            aria-controls={`tabpanel-${t}`}
+            tabIndex={t === active ? 0 : -1}
             className={`tab${t === active ? " active" : ""}`}
             onClick={() => setTab(t)}
           >
@@ -47,7 +72,7 @@ export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => v
         ))}
       </div>
 
-      <div className="tab-body">
+      <div className="tab-body" role="tabpanel" id={`tabpanel-${active}`} aria-labelledby={`tab-${active}`}>
         {active === "overview" && <OverviewTab entry={entry} />}
         {active === "request" && <MessageTab p={entry.request} protocol={entry.protocol} side="request" />}
         {active === "response" && <MessageTab p={entry.response} protocol={entry.protocol} side="response" />}
@@ -141,18 +166,30 @@ function MessageTab({
     } else {
       push(rows, "status", p.statusCode);
       push(rows, "version", p.http?.version);
+      push(rows, "ttfb", p.http?.ttfbMs ? `${p.http.ttfbMs} ms` : undefined);
     }
     push(rows, "content-type", p.contentType);
     push(rows, "size", p.size ? `${p.size} B` : undefined);
   } else if (protocol === "postgres") {
-    if (side === "request") push(rows, "query", p.query);
-    else push(rows, "tag", p.postgres?.tag);
+    if (side === "request") {
+      push(rows, "query", p.query);
+      push(rows, "portal", p.postgres?.portal);
+    } else {
+      push(rows, "tag", p.postgres?.tag);
+      push(rows, "rows", p.rowCount);
+    }
   } else if (protocol === "redis" || protocol === "valkey") {
-    if (side === "request") push(rows, "command", p.command);
-    else {
+    if (side === "request") {
+      push(rows, "command", p.command);
+      push(rows, "pipeline depth", p.redis?.pipelineDepth);
+    } else {
       push(rows, "reply", p.redis?.reply);
       push(rows, "reply type", p.redis?.replyType);
     }
+  } else if (protocol === "dns" && side === "response") {
+    push(rows, "rcode", p.dns?.rcode);
+    push(rows, "authoritative", p.dns?.authoritative ? "yes" : undefined);
+    push(rows, "recursion available", p.dns?.recursionAvailable ? "yes" : undefined);
   } else if (protocol === "amqp" && side === "request") {
     push(rows, "class", p.class);
     push(rows, "method", p.method);
@@ -221,14 +258,56 @@ function BodyTab({ entry }: { entry: Entry }) {
 }
 
 function BodyBlock({ title, p }: { title: string; p: Payload }) {
+  const pretty = useMemo(() => tryPrettyJSON(p.body), [p.body]);
+  const displayed = pretty ?? p.body;
   return (
     <>
       <div className="subhead">
         {title}
         {p.truncated && <span className="chip trunc">truncated</span>}
+        {displayed && <CopyButton text={displayed} label={`${title} body`} />}
       </div>
-      <pre className="body mono">{p.body}</pre>
+      {pretty ? (
+        <pre className="body mono" dangerouslySetInnerHTML={{ __html: highlightJSON(pretty) }} />
+      ) : (
+        <pre className="body mono">{p.body}</pre>
+      )}
     </>
+  );
+}
+
+// tryPrettyJSON returns a pretty-printed (2-space indent) rendering of body
+// when it parses as JSON, or null otherwise (plain/truncated/non-JSON
+// bodies fall back to the raw <pre> text unchanged).
+function tryPrettyJSON(body: string | undefined): string | null {
+  if (!body) return null;
+  const trimmed = body.trim();
+  // Cheap pre-filter so we don't try/catch-parse every non-JSON body (HTML,
+  // plain text, binary previews, ...).
+  if (!/^[[{]|^"|^-?\d|^(true|false|null)\b/.test(trimmed)) return null;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
+}
+
+// highlightJSON does a small regex-based tokenize-and-wrap over already
+// pretty-printed JSON text — dependency-free, matching the app's existing
+// "no charting/highlighting lib" approach (see ServiceMap.tsx). Safe against
+// injection: HTML-escapes first, then only ever wraps matched substrings in
+// a fixed <span class="..."> — no user-controlled markup is introduced.
+function highlightJSON(json: string): string {
+  const escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escaped.replace(
+    /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false)\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (match) => {
+      let cls = "jn";
+      if (match.startsWith('"')) cls = match.endsWith(":") ? "jk" : "js";
+      else if (match === "true" || match === "false") cls = "jb";
+      else if (match === "null") cls = "jz";
+      return `<span class="${cls}">${match}</span>`;
+    }
   );
 }
 
@@ -249,6 +328,7 @@ function RawBlock({ title, raw }: { title: string; raw: RawView }) {
       <div className="subhead">
         {title} · first {raw.bytes ?? 0} B of stream
         {raw.truncated && <span className="chip trunc">truncated</span>}
+        {raw.hex && <CopyButton text={raw.hex} label={`${title} raw hex`} />}
       </div>
       <pre className="hex">{raw.hex}</pre>
     </>
@@ -324,7 +404,10 @@ function KV({ rows }: { rows: Row[] }) {
 function MapBlock({ title, m }: { title: string; m: Record<string, string> }) {
   return (
     <>
-      <div className="subhead">{title}</div>
+      <div className="subhead">
+        {title}
+        <CopyButton text={Object.entries(m).map(([k, v]) => `${k}: ${v}`).join("\n")} label={title} />
+      </div>
       <table className="kv">
         <tbody>
           {Object.entries(m).map(([k, v]) => (
@@ -437,5 +520,29 @@ function Meta({ k, v }: { k: string; v: string }) {
       <span className="meta-k">{k}</span>
       <span className="meta-v mono">{v}</span>
     </div>
+  );
+}
+
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable or permission denied — nothing to recover.
+    }
+  };
+  return (
+    <button
+      type="button"
+      className="icon-btn copy-btn"
+      onClick={onClick}
+      title={`copy ${label}`}
+      aria-label={`copy ${label}`}
+    >
+      {copied ? "✓" : "⧉"}
+    </button>
   );
 }

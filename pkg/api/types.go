@@ -235,6 +235,8 @@ const (
 	MsgHello MessageType = "hello"
 	// front -> hub: set/replace the active KFL filter
 	MsgFilter MessageType = "filter"
+	// hub -> front: a ?filter= or filter frame failed to compile
+	MsgFilterError MessageType = "filterError"
 )
 
 // Envelope wraps every WebSocket frame. Exactly one of the payload pointers is
@@ -245,6 +247,7 @@ type Envelope struct {
 	Stats  *Stats      `json:"stats,omitempty"`
 	Hello  *Hello      `json:"hello,omitempty"`
 	Filter string      `json:"filter,omitempty"`
+	Error  string      `json:"error,omitempty"`
 }
 
 // Hello is sent by a worker when it connects to the hub.
@@ -260,4 +263,17 @@ type Stats struct {
 	Workers       int              `json:"workers"`
 	ByProtocol    map[string]int64 `json:"byProtocol"`
 	ByStatus      map[string]int64 `json:"byStatus"`
+	// BroadcastDropped counts entries dropped to slow front clients (send
+	// buffer full) since the hub started — a degradation signal beyond the
+	// binary connected/disconnected indicator.
+	BroadcastDropped int64 `json:"broadcastDropped"`
+}
+
+// StatsPoint is one sample in the hub's rolling stats history (see
+// GET /api/stats/history), used to chart throughput trends — e.g. a
+// "entries/sec over the last few minutes" sparkline.
+type StatsPoint struct {
+	Timestamp     time.Time `json:"timestamp"`
+	EntriesPerSec float64   `json:"entriesPerSec"`
+	TotalEntries  int64     `json:"totalEntries"`
 }
