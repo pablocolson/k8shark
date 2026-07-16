@@ -32,3 +32,27 @@ func TestStoreGetByID(t *testing.T) {
 		t.Fatalf("get(e3) = %v, want the live entry", got)
 	}
 }
+
+// Trailing windows: only entries inside 1m/5m count, and errors are tallied.
+func TestStoreWindowStats(t *testing.T) {
+	s := newStore(16)
+	now := time.Now()
+	add := func(id string, age time.Duration, status string) {
+		s.add(&api.Entry{ID: id, Protocol: api.ProtocolHTTP, Timestamp: now.Add(-age), Status: status})
+	}
+	add("old", 10*time.Minute, "error") // outside both windows
+	add("w5", 3*time.Minute, "error")   // 5m only
+	add("w1a", 30*time.Second, "success")
+	add("w1b", 5*time.Second, "error")
+
+	st := s.stats(1)
+	if st.Last1m == nil || st.Last5m == nil {
+		t.Fatal("windows missing from stats")
+	}
+	if st.Last1m.Entries != 2 || st.Last1m.Errors != 1 {
+		t.Errorf("last1m = %d entries %d errors, want 2/1", st.Last1m.Entries, st.Last1m.Errors)
+	}
+	if st.Last5m.Entries != 3 || st.Last5m.Errors != 2 {
+		t.Errorf("last5m = %d entries %d errors, want 3/2", st.Last5m.Entries, st.Last5m.Errors)
+	}
+}

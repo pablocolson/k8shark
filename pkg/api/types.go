@@ -28,6 +28,9 @@ type Endpoint struct {
 	Name string `json:"name,omitempty"`
 	// Namespace is the k8s namespace when known.
 	Namespace string `json:"namespace,omitempty"`
+	// Workload is the owning controller (Deployment/StatefulSet/...) when known.
+	// Unlike Name (a churning pod name), it is stable across pod restarts.
+	Workload string `json:"workload,omitempty"`
 }
 
 // Payload holds the protocol-specific request or response details. Fields are
@@ -235,22 +238,44 @@ const (
 	MsgHello MessageType = "hello"
 	// front -> hub: set/replace the active KFL filter
 	MsgFilter MessageType = "filter"
+	// worker -> hub: periodic worker self-report (drop counters, capture state)
+	MsgWorkerStats MessageType = "workerStats"
 )
 
 // Envelope wraps every WebSocket frame. Exactly one of the payload pointers is
 // set, matching Type.
 type Envelope struct {
-	Type   MessageType `json:"type"`
-	Entry  *Entry      `json:"entry,omitempty"`
-	Stats  *Stats      `json:"stats,omitempty"`
-	Hello  *Hello      `json:"hello,omitempty"`
-	Filter string      `json:"filter,omitempty"`
+	Type        MessageType  `json:"type"`
+	Entry       *Entry       `json:"entry,omitempty"`
+	Stats       *Stats       `json:"stats,omitempty"`
+	Hello       *Hello       `json:"hello,omitempty"`
+	Filter      string       `json:"filter,omitempty"`
+	WorkerStats *WorkerStats `json:"workerStats,omitempty"`
 }
 
 // Hello is sent by a worker when it connects to the hub.
 type Hello struct {
 	Node    string `json:"node"`
 	Version string `json:"version"`
+}
+
+// WorkerStats is a worker's periodic self-report, so the hub (and its API
+// consumers) can tell a quiet node from a broken or dropping one.
+type WorkerStats struct {
+	Node        string `json:"node"`
+	EntriesSent uint64 `json:"entriesSent"` // entries handed to the hub connection
+	Dropped     uint64 `json:"dropped"`     // entries dropped on a full sink buffer
+	CaptureLive bool   `json:"captureLive"` // AF_PACKET source currently active
+	CaptureTLS  bool   `json:"captureTls"`  // eBPF TLS capture currently active
+}
+
+// WindowStats is a trailing-window slice of traffic, for "current" rates as
+// opposed to the cumulative since-start counters.
+type WindowStats struct {
+	Entries       int64   `json:"entries"`
+	Errors        int64   `json:"errors"`
+	Warnings      int64   `json:"warnings"`
+	EntriesPerSec float64 `json:"entriesPerSec"`
 }
 
 // Stats is a rolling aggregate the hub pushes to the front for the header/graphs.
@@ -260,4 +285,8 @@ type Stats struct {
 	Workers       int              `json:"workers"`
 	ByProtocol    map[string]int64 `json:"byProtocol"`
 	ByStatus      map[string]int64 `json:"byStatus"`
+	// Last1m/Last5m are trailing windows over the in-memory buffer (nil on old
+	// hubs; additive).
+	Last1m *WindowStats `json:"last1m,omitempty"`
+	Last5m *WindowStats `json:"last5m,omitempty"`
 }

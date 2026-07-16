@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +29,10 @@ const (
 type ref struct {
 	name      string
 	namespace string
+	// workload is the owning controller (Deployment/StatefulSet/...): a stable
+	// label where name churns with every pod restart. For services it is the
+	// service name itself.
+	workload string
 }
 
 // resolver maps pod/service IPs to their k8s identity by periodically listing
@@ -93,7 +100,7 @@ func (r *resolver) run(ctx context.Context) {
 // refresh rebuilds byIP from a pods list plus a services list. On a failed or
 // empty refresh it keeps the previous map rather than blanking enrichment.
 func (r *resolver) refresh(ctx context.Context) {
-	m := r.listPods(ctx)
+	m := r.listPods(ctx, r.listReplicaSetOwners(ctx))
 	if m == nil {
 		return // request failed; keep the previous map
 	}
@@ -134,30 +141,121 @@ func (r *resolver) get(ctx context.Context, path string, out any) bool {
 	return true
 }
 
-func (r *resolver) listPods(ctx context.Context) map[string]ref {
-	var list struct {
-		Items []struct {
-			Metadata struct{ Name, Namespace string } `json:"metadata"`
-			Spec     struct {
-				HostNetwork bool `json:"hostNetwork"`
-			} `json:"spec"`
-			Status struct {
-				PodIP  string `json:"podIP"`
-				PodIPs []struct {
-					IP string `json:"ip"`
-				} `json:"podIPs"`
-			} `json:"status"`
-		} `json:"items"`
+// listPageSize bounds each list request so a big cluster is fetched in pages
+// instead of one giant response.
+const listPageSize = 500
+
+// objMeta is the metadata subset the resolver reads off any listed object.
+type objMeta struct {
+	Name            string `json:"name"`
+	Namespace       string `json:"namespace"`
+	OwnerReferences []struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	} `json:"ownerReferences"`
+}
+
+// listAll GETs a paginated list endpoint, following the continue token, and
+// returns every item. ok is false when any page failed (callers then keep
+// their previous state rather than working from a partial list).
+func listAll[T any](ctx context.Context, r *resolver, path string) (items []T, ok bool) {
+	var page struct {
+		Metadata struct {
+			Continue string `json:"continue"`
+		} `json:"metadata"`
+		Items []T `json:"items"`
 	}
-	if !r.get(ctx, "/api/v1/pods", &list) {
+	cont := ""
+	for {
+		u := path + "?limit=" + strconv.Itoa(listPageSize)
+		if cont != "" {
+			u += "&continue=" + url.QueryEscape(cont)
+		}
+		page.Metadata.Continue = ""
+		page.Items = nil
+		if !r.get(ctx, u, &page) {
+			return nil, false
+		}
+		items = append(items, page.Items...)
+		if page.Metadata.Continue == "" {
+			return items, true
+		}
+		cont = page.Metadata.Continue
+	}
+}
+
+// listReplicaSetOwners maps "namespace/replicaset-name" to the owning
+// Deployment's name, so pods resolve to the stable Deployment rather than a
+// hash-suffixed ReplicaSet. Best effort: on failure workloadOf falls back to
+// stripping the pod-template hash off the ReplicaSet name.
+func (r *resolver) listReplicaSetOwners(ctx context.Context) map[string]string {
+	type rs struct {
+		Metadata objMeta `json:"metadata"`
+	}
+	items, ok := listAll[rs](ctx, r, "/apis/apps/v1/replicasets")
+	if !ok {
 		return nil
 	}
-	m := make(map[string]ref, len(list.Items))
-	for _, p := range list.Items {
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		for _, o := range it.Metadata.OwnerReferences {
+			if o.Kind == "Deployment" {
+				m[it.Metadata.Namespace+"/"+it.Metadata.Name] = o.Name
+				break
+			}
+		}
+	}
+	return m
+}
+
+// workloadOf resolves a pod's owning controller name. rsOwners may be nil.
+func workloadOf(meta objMeta, rsOwners map[string]string) string {
+	for _, o := range meta.OwnerReferences {
+		switch o.Kind {
+		case "ReplicaSet":
+			if d, ok := rsOwners[meta.Namespace+"/"+o.Name]; ok {
+				return d
+			}
+			// ReplicaSet names are "<deployment>-<pod-template-hash>"; stripping
+			// the last segment recovers the Deployment when the RS list failed.
+			if i := strings.LastIndexByte(o.Name, '-'); i > 0 {
+				return o.Name[:i]
+			}
+			return o.Name
+		case "StatefulSet", "DaemonSet", "Job":
+			return o.Name
+		}
+	}
+	return meta.Name // bare pod: the pod is its own workload
+}
+
+func (r *resolver) listPods(ctx context.Context, rsOwners map[string]string) map[string]ref {
+	type pod struct {
+		Metadata objMeta `json:"metadata"`
+		Spec     struct {
+			HostNetwork bool `json:"hostNetwork"`
+		} `json:"spec"`
+		Status struct {
+			PodIP  string `json:"podIP"`
+			PodIPs []struct {
+				IP string `json:"ip"`
+			} `json:"podIPs"`
+		} `json:"status"`
+	}
+	items, ok := listAll[pod](ctx, r, "/api/v1/pods")
+	if !ok {
+		return nil
+	}
+	m := make(map[string]ref, len(items))
+	for _, p := range items {
 		if p.Spec.HostNetwork {
 			continue // shares the node IP — ambiguous, skip
 		}
-		rf := ref{name: p.Metadata.Name, namespace: p.Metadata.Namespace}
+		rf := ref{
+			name:      p.Metadata.Name,
+			namespace: p.Metadata.Namespace,
+			workload:  workloadOf(p.Metadata, rsOwners),
+		}
 		if p.Status.PodIP != "" {
 			m[p.Status.PodIP] = rf
 		}
@@ -171,21 +269,20 @@ func (r *resolver) listPods(ctx context.Context) map[string]ref {
 }
 
 func (r *resolver) listServices(ctx context.Context) map[string]ref {
-	var list struct {
-		Items []struct {
-			Metadata struct{ Name, Namespace string } `json:"metadata"`
-			Spec     struct {
-				ClusterIP  string   `json:"clusterIP"`
-				ClusterIPs []string `json:"clusterIPs"`
-			} `json:"spec"`
-		} `json:"items"`
+	type svc struct {
+		Metadata objMeta `json:"metadata"`
+		Spec     struct {
+			ClusterIP  string   `json:"clusterIP"`
+			ClusterIPs []string `json:"clusterIPs"`
+		} `json:"spec"`
 	}
-	if !r.get(ctx, "/api/v1/services", &list) {
+	items, ok := listAll[svc](ctx, r, "/api/v1/services")
+	if !ok {
 		return nil
 	}
-	m := make(map[string]ref, len(list.Items))
-	for _, s := range list.Items {
-		rf := ref{name: s.Metadata.Name, namespace: s.Metadata.Namespace}
+	m := make(map[string]ref, len(items))
+	for _, s := range items {
+		rf := ref{name: s.Metadata.Name, namespace: s.Metadata.Namespace, workload: s.Metadata.Name}
 		for _, ip := range append(s.Spec.ClusterIPs, s.Spec.ClusterIP) {
 			if ip != "" && ip != "None" {
 				m[ip] = rf
@@ -206,13 +303,19 @@ func (r *resolver) enrich(e *api.Entry) {
 }
 
 func (r *resolver) enrichEndpoint(ep *api.Endpoint) {
-	if ep.Name != "" || ep.IP == "" {
+	if ep.IP == "" {
 		return
 	}
 	r.mu.RLock()
 	rf, ok := r.byIP[ep.IP]
 	r.mu.RUnlock()
-	if ok {
+	if !ok {
+		return
+	}
+	if ep.Name == "" {
 		ep.Name, ep.Namespace = rf.name, rf.namespace
+	}
+	if ep.Workload == "" {
+		ep.Workload = rf.workload
 	}
 }

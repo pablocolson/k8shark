@@ -51,6 +51,9 @@ spec:
             {{- if not .Values.worker.capture.captureBodies }}
             - --capture-bodies=false
             {{- end }}
+            {{- if not .Values.worker.capture.redactHeaders }}
+            - --redact-headers=false
+            {{- end }}
             {{- if .Values.worker.capture.bodyBytes }}
             - --body-bytes={{ .Values.worker.capture.bodyBytes }}
             {{- end }}
@@ -69,6 +72,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.hub.apiToken }}
+            - name: K8SHARK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: token
+            {{- end }}
           securityContext:
             privileged: {{ .Values.worker.privileged }}
             # Force root: the image ships USER 65532 (non-root), but AF_PACKET +

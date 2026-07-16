@@ -25,6 +25,15 @@ pdb:
 hub:
   port: 8898
   replicas: 1
+  # bufferSize: how many recent entries the hub keeps in memory (0 = built-in
+  # default, 10000). At 1k entries/s the default is only ~10s of history —
+  # raise it (with the memory limit) when debugging busy clusters.
+  bufferSize: 0
+  # apiToken: when set, /api and the WebSocket endpoints require
+  # `Authorization: Bearer <token>` (or ?token=). Workers and the front proxy
+  # receive it automatically via a Secret; port-forward users pass it by hand.
+  # Empty (default) keeps the API open, as before.
+  apiToken: ""
   resources:
     requests:
       cpu: 100m
@@ -62,6 +71,10 @@ worker:
     captureBodies: true # set false to omit request/response bodies entirely
     bodyBytes: 0        # 0 = default 4096; max body bytes per direction
     rawBytes: 0         # 0 = default 2048; <0 disables the raw hex view
+    # redactHeaders: scrub credential-bearing HTTP header values
+    # (authorization, cookie, x-api-key, ...) from captured entries. The raw
+    # hex view is separate — set rawBytes to -1 to close that path too.
+    redactHeaders: true
   # tls: eBPF uprobe TLS capture (hybrid layer — keeps AF_PACKET for plaintext,
   # adds OpenSSL/boringssl uprobes for HTTPS). Off by default and fully
   # additive: AF_PACKET behavior is identical either way.

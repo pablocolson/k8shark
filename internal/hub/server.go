@@ -6,10 +6,12 @@ package hub
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,15 +23,34 @@ import (
 	"github.com/pablocolson/k8shark/pkg/api"
 )
 
+// Options configures a hub. The zero value is a working local-dev hub.
+type Options struct {
+	// UIDir, when non-empty, is a directory whose static files are served at
+	// "/" (used for local runs; in-cluster the front is a separate nginx pod).
+	UIDir string
+	// APIToken, when non-empty, requires `Authorization: Bearer <token>` (or a
+	// ?token= query param, for browser WebSockets) on /api/* and the WebSocket
+	// endpoints. Empty keeps the API open (local dev, trusted clusters).
+	APIToken string
+	// BufferSize overrides the in-memory entry ring size (0 = default).
+	BufferSize int
+}
+
 // Server is the hub. Construct with New and start with Run.
 type Server struct {
 	store    *store
 	log      *slog.Logger
 	upgrader websocket.Upgrader
+	apiToken string
 
 	mu           sync.RWMutex
 	frontClients map[*frontClient]struct{}
 	workerCount  int32
+
+	// wmu guards workers, the per-node registry behind /api/workers. Separate
+	// from mu so per-entry bookkeeping never contends with the broadcast path.
+	wmu     sync.Mutex
+	workers map[string]*workerInfo
 
 	broadcastDropped int64 // entries dropped to slow front clients (atomic)
 
@@ -38,16 +59,20 @@ type Server struct {
 	uiDir string // optional: serve a built front from here (local dev)
 }
 
-// New builds a hub. uiDir, when non-empty, is a directory whose static files
-// are served at "/" (used for local runs; in-cluster the front is a separate
-// nginx pod).
-func New(log *slog.Logger, uiDir string) *Server {
+// New builds a hub.
+func New(log *slog.Logger, opts Options) *Server {
+	size := opts.BufferSize
+	if size <= 0 {
+		size = config.EntryBufferSize
+	}
 	return &Server{
-		store:        newStore(config.EntryBufferSize),
+		store:        newStore(size),
 		log:          log,
+		apiToken:     opts.APIToken,
 		frontClients: map[*frontClient]struct{}{},
+		workers:      map[string]*workerInfo{},
 		resolver:     newResolver(log),
-		uiDir:        uiDir,
+		uiDir:        opts.UIDir,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -67,6 +92,9 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/entries", s.handleEntries)
 	mux.HandleFunc("/api/entry/", s.handleEntry)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/summary", s.handleSummary)
+	mux.HandleFunc("/api/timeline", s.handleTimeline)
+	mux.HandleFunc("/api/workers", s.handleWorkers)
 	mux.HandleFunc("/api/fields", s.handleFields)
 	mux.HandleFunc("/api/fields/", s.handleFieldValues)
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -78,13 +106,13 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 		mux.Handle("/", http.FileServer(http.Dir(s.uiDir)))
 	}
 
-	go s.statsLoop()
+	go s.statsLoop(ctx)
 	go s.resolver.run(ctx)
 
-	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "")
+	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           withCORS(mux),
+		Handler:           withCORS(s.withAuth(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -110,6 +138,21 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 
 // --- worker channel --------------------------------------------------------
 
+// workerInfo is one row of the /api/workers registry: a worker's lifecycle
+// plus its self-reported counters, kept after disconnect so "worker was here,
+// went away 2 min ago" is answerable during an incident.
+type workerInfo struct {
+	Node        string    `json:"node"`
+	Version     string    `json:"version,omitempty"`
+	Connected   bool      `json:"connected"`
+	ConnectedAt time.Time `json:"connectedAt"`
+	LastSeen    time.Time `json:"lastSeen"`
+	Entries     int64     `json:"entries"`     // entries the hub received from this worker
+	Dropped     uint64    `json:"dropped"`     // worker-reported sink-buffer drops
+	CaptureLive bool      `json:"captureLive"` // AF_PACKET source active on the worker
+	CaptureTLS  bool      `json:"captureTls"`  // eBPF TLS capture active on the worker
+}
+
 func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -123,6 +166,9 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 	defer atomic.AddInt32(&s.workerCount, -1)
 
 	node := "unknown"
+	defer func() {
+		s.workerUpdate(node, func(wi *workerInfo) { wi.Connected = false })
+	}()
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -137,16 +183,65 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 		case api.MsgHello:
 			if env.Hello != nil {
 				node = env.Hello.Node
-				s.log.Info("worker connected", "node", node, "version", env.Hello.Version)
+				version := env.Hello.Version
+				s.log.Info("worker connected", "node", node, "version", version)
+				now := time.Now()
+				s.workerUpdate(node, func(wi *workerInfo) {
+					wi.Version = version
+					wi.Connected = true
+					wi.ConnectedAt = now
+					wi.LastSeen = now
+				})
 			}
 		case api.MsgEntry:
 			if env.Entry != nil {
 				s.resolver.enrich(env.Entry)
 				s.store.add(env.Entry)
 				s.broadcast(env.Entry)
+				s.workerUpdate(node, func(wi *workerInfo) {
+					wi.Entries++
+					wi.LastSeen = time.Now()
+				})
+			}
+		case api.MsgWorkerStats:
+			if ws := env.WorkerStats; ws != nil {
+				s.workerUpdate(node, func(wi *workerInfo) {
+					wi.Dropped = ws.Dropped
+					wi.CaptureLive = ws.CaptureLive
+					wi.CaptureTLS = ws.CaptureTLS
+					wi.LastSeen = time.Now()
+				})
 			}
 		}
 	}
+}
+
+// workerUpdate applies fn to node's registry row, creating it on first sight.
+// A pre-hello connection ("unknown" node) is not tracked.
+func (s *Server) workerUpdate(node string, fn func(*workerInfo)) {
+	if node == "" || node == "unknown" {
+		return
+	}
+	s.wmu.Lock()
+	wi := s.workers[node]
+	if wi == nil {
+		wi = &workerInfo{Node: node}
+		s.workers[node] = wi
+	}
+	fn(wi)
+	s.wmu.Unlock()
+}
+
+// workerSnapshot copies the registry, sorted by node name.
+func (s *Server) workerSnapshot() []workerInfo {
+	s.wmu.Lock()
+	out := make([]workerInfo, 0, len(s.workers))
+	for _, wi := range s.workers {
+		out = append(out, *wi)
+	}
+	s.wmu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out
 }
 
 // --- front channel ---------------------------------------------------------
@@ -318,10 +413,15 @@ func (s *Server) broadcast(e *api.Entry) {
 
 // --- stats -----------------------------------------------------------------
 
-func (s *Server) statsLoop() {
+func (s *Server) statsLoop(ctx context.Context) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
-	for range t.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 		b := s.statsBytes()
 		s.mu.RLock()
 		for c := range s.frontClients {
@@ -342,16 +442,84 @@ func (s *Server) statsBytes() []byte {
 func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 	limit := 200
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= config.EntryBufferSize {
-			limit = n
+		// Invalid or non-positive keeps the default; oversized clamps to the
+		// buffer instead of silently snapping back to 200.
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = clampInt(n, 1, s.store.capacity)
 		}
 	}
-	pred, err := CompileFilter(r.URL.Query().Get("filter"))
+	pred, err := s.queryPredicate(r)
 	if err != nil {
-		http.Error(w, "invalid filter: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, s.store.recent(limit, pred))
+}
+
+// queryPredicate compiles the shared ?filter=&since=&until= query params into
+// one predicate. since/until accept RFC3339, unix seconds, or a relative
+// duration meaning "that long ago" (e.g. since=15m).
+func (s *Server) queryPredicate(r *http.Request) (Predicate, error) {
+	pred, err := CompileFilter(r.URL.Query().Get("filter"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid filter: %w", err)
+	}
+	since, until, err := timeRange(r)
+	if err != nil {
+		return nil, err
+	}
+	if since.IsZero() && until.IsZero() {
+		return pred, nil
+	}
+	return func(e *api.Entry) bool {
+		if !since.IsZero() && e.Timestamp.Before(since) {
+			return false
+		}
+		if !until.IsZero() && e.Timestamp.After(until) {
+			return false
+		}
+		return pred(e)
+	}, nil
+}
+
+// timeRange parses the optional since/until query params.
+func timeRange(r *http.Request) (since, until time.Time, err error) {
+	if v := r.URL.Query().Get("since"); v != "" {
+		if since, err = parseTimeParam(v); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid since: %w", err)
+		}
+	}
+	if v := r.URL.Query().Get("until"); v != "" {
+		if until, err = parseTimeParam(v); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid until: %w", err)
+		}
+	}
+	return since, until, nil
+}
+
+// parseTimeParam accepts RFC3339 ("2026-07-15T14:00:00Z"), unix seconds
+// ("1752588000"), or a Go duration meaning that long ago ("15m", "1h30m").
+func parseTimeParam(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return time.Unix(secs, 0), nil
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return time.Now().Add(-d), nil
+	}
+	return time.Time{}, fmt.Errorf("want RFC3339, unix seconds, or a duration like 15m: %q", v)
+}
+
+func clampInt(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 func (s *Server) handleEntry(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +534,80 @@ func (s *Server) handleEntry(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.store.stats(int(atomic.LoadInt32(&s.workerCount))))
+}
+
+// handleSummary serves GET /api/summary?groupBy=&filter=&since=&until=&limit=,
+// aggregating the buffered entries into per-group counts, error totals and
+// latency percentiles. See summarize (summary.go) for the groupBy keys.
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	groupBy := r.URL.Query().Get("groupBy")
+	if groupBy == "" {
+		groupBy = "workload"
+	}
+	if !validGroupBy(groupBy) {
+		http.Error(w, "unknown groupBy field: "+groupBy, http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = clampInt(n, 1, 1000)
+		}
+	}
+	pred, err := s.queryPredicate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	entries := s.store.recent(s.store.capacity, pred)
+	groups := summarize(entries, groupBy)
+	if len(groups) > limit {
+		groups = groups[:limit]
+	}
+	writeJSON(w, map[string]any{
+		"groupBy": groupBy,
+		"total":   len(entries),
+		"groups":  groups,
+	})
+}
+
+// handleTimeline serves GET /api/timeline?bucket=&filter=&since=&until=,
+// bucketing matching entries into a fixed-step time series (gaps included as
+// zero buckets) so "when did this start" is answerable at a glance.
+func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	bucket := 60 * time.Second
+	if v := r.URL.Query().Get("bucket"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			bucket = time.Duration(clampInt(n, 1, 3600)) * time.Second
+		}
+	}
+	since, until, err := timeRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if until.IsZero() {
+		until = time.Now()
+	}
+	if since.IsZero() {
+		since = until.Add(-15 * time.Minute)
+	}
+	pred, err := s.queryPredicate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	entries := s.store.recent(s.store.capacity, pred)
+	writeJSON(w, map[string]any{
+		"bucketSeconds": int(bucket / time.Second),
+		"buckets":       timeline(entries, since, until, bucket),
+	})
+}
+
+// handleWorkers serves GET /api/workers: every worker ever seen (connected or
+// not), with self-reported drop/capture state.
+func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.workerSnapshot())
 }
 
 // handleMetrics emits the hub's self-metrics in Prometheus text exposition
@@ -391,6 +633,31 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Currently connected workers.", strconv.Itoa(st.Workers))
 	metric("k8shark_hub_broadcast_dropped_total", "counter",
 		"Entries dropped to slow front clients.", strconv.FormatInt(dropped, 10))
+
+	// Per-worker series, from the registry (self-reported drops make silent
+	// capture loss visible to alerting).
+	workers := s.workerSnapshot()
+	if len(workers) > 0 {
+		fmt.Fprintf(&b, "# HELP k8shark_worker_entries_total Entries received from each worker.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_entries_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_entries_total{node=%q} %d\n", wi.Node, wi.Entries)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_dropped_total Worker-reported entries dropped before reaching the hub.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_dropped_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_dropped_total{node=%q} %d\n", wi.Node, wi.Dropped)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_connected Whether the worker is currently connected.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_connected gauge\n")
+		for _, wi := range workers {
+			v := 0
+			if wi.Connected {
+				v = 1
+			}
+			fmt.Fprintf(&b, "k8shark_worker_connected{node=%q} %d\n", wi.Node, v)
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
@@ -493,6 +760,33 @@ func (s *Server) fieldValuesFor(spec FieldSpec, prefix string, limit int) []Fiel
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// withAuth enforces the optional API token on /api/* and the WebSocket
+// endpoints. Static UI assets, /healthz and /metrics stay open (the data is
+// behind /api; metrics scraping is cluster-internal). Browsers cannot set
+// headers on a WebSocket, so a ?token= query param is accepted as well.
+func (s *Server) withAuth(h http.Handler) http.Handler {
+	if s.apiToken == "" {
+		return h
+	}
+	want := []byte(s.apiToken)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if !strings.HasPrefix(p, "/api/") && p != "/api" && p != "/ws" && !strings.HasPrefix(p, "/ws/") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		got := r.URL.Query().Get("token")
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			got = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func withCORS(h http.Handler) http.Handler {

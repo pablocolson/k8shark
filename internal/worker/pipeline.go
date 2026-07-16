@@ -62,6 +62,10 @@ type pipeline struct {
 	bodyCap       int // max body bytes per direction
 	rawCap        int // max raw hex bytes per direction (<0 disables raw capture)
 	headerHexCap  int // max L2/L3/L4 header hexdump bytes
+
+	// redactHeaders scrubs credential-bearing HTTP header values (the raw hex
+	// view is separate — disable it via rawCap < 0 for full scrubbing).
+	redactHeaders bool
 }
 
 func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
@@ -87,6 +91,7 @@ func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
 // capture entirely.
 func (p *pipeline) applyCaptureOpts(opts Options) {
 	p.captureBodies = opts.CaptureBodies
+	p.redactHeaders = opts.RedactHeaders
 	if opts.BodyBytes > 0 {
 		p.bodyCap = opts.BodyBytes
 	}
@@ -297,7 +302,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 			ct := resp.Header.Get("Content-Type")
 			p.completeResponse(key, api.Payload{
 				StatusCode:  resp.StatusCode,
-				Headers:     flattenHeaders(resp.Header),
+				Headers:     p.flattenHeaders(resp.Header),
 				Body:        body,
 				Truncated:   truncated,
 				Size:        full,
@@ -321,7 +326,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 			Method:      req.Method,
 			Path:        req.URL.RequestURI(),
 			Host:        req.Host,
-			Headers:     flattenHeaders(req.Header),
+			Headers:     p.flattenHeaders(req.Header),
 			Body:        body,
 			Truncated:   truncated,
 			Size:        full,
@@ -559,10 +564,28 @@ func parseQuery(u *url.URL) map[string]string {
 	return out
 }
 
-func flattenHeaders(h http.Header) map[string]string {
+// sensitiveHeaders are credential-bearing headers whose values are scrubbed
+// when redaction is on (keys are kept so their presence stays observable).
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"set-cookie":          true,
+	"x-api-key":           true,
+	"x-auth-token":        true,
+}
+
+const redactedValue = "[REDACTED]"
+
+func (p *pipeline) flattenHeaders(h http.Header) map[string]string {
 	out := make(map[string]string, len(h))
 	for k, v := range h {
-		out[strings.ToLower(k)] = strings.Join(v, ", ")
+		lk := strings.ToLower(k)
+		if p.redactHeaders && sensitiveHeaders[lk] {
+			out[lk] = redactedValue
+			continue
+		}
+		out[lk] = strings.Join(v, ", ")
 	}
 	return out
 }

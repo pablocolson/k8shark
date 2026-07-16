@@ -14,13 +14,18 @@ import (
 func hubCmd() *cobra.Command {
 	var port int
 	var uiDir string
+	var apiToken string
+	var bufferSize int
 	cmd := &cobra.Command{
 		Use:   "hub",
 		Short: "Run the hub server (aggregates worker traffic, serves the API)",
 		Long: "Runs the central hub that receives entries from workers and streams\n" +
 			"them to front-end clients. This is what the hub container runs.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			s := hub.New(log, uiDir)
+			if apiToken == "" {
+				apiToken = os.Getenv("K8SHARK_API_TOKEN")
+			}
+			s := hub.New(log, hub.Options{UIDir: uiDir, APIToken: apiToken, BufferSize: bufferSize})
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			return s.Run(ctx, fmt.Sprintf(":%d", port))
@@ -28,5 +33,7 @@ func hubCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&port, "port", config.DefaultHubPort, "listen port")
 	cmd.Flags().StringVar(&uiDir, "serve-ui", "", "serve a built front from this directory (local dev)")
+	cmd.Flags().StringVar(&apiToken, "api-token", "", "require this bearer token on /api and WebSocket endpoints (default $K8SHARK_API_TOKEN; empty disables auth)")
+	cmd.Flags().IntVar(&bufferSize, "buffer", 0, "in-memory entry buffer size (0 = default 10000)")
 	return cmd
 }

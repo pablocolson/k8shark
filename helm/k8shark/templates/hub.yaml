@@ -6,6 +6,50 @@ metadata:
   labels:
     {{- include "k8shark.labels" . | nindent 4 }}
 ---
+# Read-only enrichment permissions: the hub maps captured IPs to pod/service/
+# workload names by listing the API (internal/hub/k8s.go). Without this the
+# hub still runs — entries just keep bare ip:port endpoints.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8shark-hub-enrich
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8shark-hub-enrich
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8shark-hub-enrich
+subjects:
+  - kind: ServiceAccount
+    name: k8shark-hub
+    namespace: {{ .Release.Namespace }}
+---
+{{- if .Values.hub.apiToken }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: k8shark-api-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+stringData:
+  token: {{ .Values.hub.apiToken | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,6 +84,17 @@ spec:
             - hub
             - --port={{ .Values.hub.port }}
             - --log-level={{ .Values.logLevel }}
+            {{- if .Values.hub.bufferSize }}
+            - --buffer={{ .Values.hub.bufferSize }}
+            {{- end }}
+          {{- if .Values.hub.apiToken }}
+          env:
+            - name: K8SHARK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: token
+          {{- end }}
           ports:
             - name: hub
               containerPort: {{ .Values.hub.port }}

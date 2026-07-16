@@ -54,3 +54,54 @@ func TestResolverDisabledNoop(t *testing.T) {
 		t.Errorf("disabled resolver enriched %q, want no-op", e.Source.Name)
 	}
 }
+
+// The workload label (stable across pod restarts) is filled alongside the pod
+// name, including on endpoints whose Name was already set by the worker.
+func TestResolverEnrichWorkload(t *testing.T) {
+	r := &resolver{
+		client: &http.Client{},
+		byIP: map[string]ref{
+			"10.0.0.1": {name: "web-7d9f4b-x2x4v", namespace: "shop", workload: "web"},
+		},
+	}
+	e := &api.Entry{Source: api.Endpoint{IP: "10.0.0.1"}, Destination: api.Endpoint{IP: "10.0.0.1", Name: "keep"}}
+	r.enrich(e)
+	if e.Source.Workload != "web" {
+		t.Errorf("source workload = %q, want web", e.Source.Workload)
+	}
+	// Name already set (worker-supplied) still gains the workload.
+	if e.Destination.Name != "keep" || e.Destination.Workload != "web" {
+		t.Errorf("dest = %q/%q, want keep/web", e.Destination.Name, e.Destination.Workload)
+	}
+}
+
+// workloadOf resolves pod owners: ReplicaSet -> Deployment (via the RS map,
+// or by stripping the pod-template hash when the map is missing), direct
+// controllers by name, bare pods to themselves.
+func TestWorkloadOf(t *testing.T) {
+	owner := func(kind, name string) objMeta {
+		m := objMeta{Name: "pod-x", Namespace: "shop"}
+		m.OwnerReferences = append(m.OwnerReferences, struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		}{kind, name})
+		return m
+	}
+	rsOwners := map[string]string{"shop/web-7d9f4b": "web"}
+
+	if got := workloadOf(owner("ReplicaSet", "web-7d9f4b"), rsOwners); got != "web" {
+		t.Errorf("RS via map = %q, want web", got)
+	}
+	if got := workloadOf(owner("ReplicaSet", "api-5c9d8e"), nil); got != "api" {
+		t.Errorf("RS via hash-strip = %q, want api", got)
+	}
+	if got := workloadOf(owner("StatefulSet", "pg"), nil); got != "pg" {
+		t.Errorf("StatefulSet = %q, want pg", got)
+	}
+	if got := workloadOf(owner("DaemonSet", "fluentd"), nil); got != "fluentd" {
+		t.Errorf("DaemonSet = %q, want fluentd", got)
+	}
+	if got := workloadOf(objMeta{Name: "one-off", Namespace: "shop"}, nil); got != "one-off" {
+		t.Errorf("bare pod = %q, want one-off", got)
+	}
+}

@@ -18,7 +18,7 @@ func mkTCP(seq uint32, syn, ack, fin bool, window uint16, payload int, opts ...l
 }
 
 func TestTrackTCPSnapshotL4(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	// client 40000 -> server 80
 	reqNet, reqTr, respNet, respTr := flows(40000, 80)
@@ -75,7 +75,7 @@ func TestTrackTCPSnapshotL4(t *testing.T) {
 
 // A FIN closes the flow and emits a generic L4 entry carrying L4Info.
 func TestTrackTCPCloseEmitsL4(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	reqNet, reqTr, _, _ := flows(41000, 443)
 	base := time.Unix(1_700_000_000, 0)

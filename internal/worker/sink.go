@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -18,26 +20,39 @@ import (
 // silently drops all capture.
 const sinkWriteTimeout = 10 * time.Second
 
+// sinkStatsInterval is how often the sink self-reports drop counters and
+// capture state to the hub (surfaced at /api/workers).
+const sinkStatsInterval = 10 * time.Second
+
 // sink is a reconnecting WebSocket client that ships entries to the hub. Entries
 // are buffered on a channel; if the hub is unreachable the buffer drops the
 // newest (incoming) entry rather than blocking capture.
 type sink struct {
-	hubURL string
-	node   string
-	log    *slog.Logger
+	hubURL   string
+	hubToken string // bearer token sent on dial ("" = no auth)
+	node     string
+	log      *slog.Logger
 
 	ch      chan *api.Entry
 	dropped atomic.Uint64 // entries dropped on a full buffer
-	mu      sync.Mutex
-	conn    *websocket.Conn
+	sent    atomic.Uint64 // entries successfully written to the hub
+
+	// capture state, set by worker.Run / captureLoop and self-reported to the
+	// hub so a dead capture source is visible cluster-side, not just in logs.
+	captureLive atomic.Bool // AF_PACKET source active
+	captureTLS  atomic.Bool // eBPF TLS capture active
+
+	mu   sync.Mutex
+	conn *websocket.Conn
 }
 
-func newSink(hubURL, node string, log *slog.Logger) *sink {
+func newSink(hubURL, hubToken, node string, log *slog.Logger) *sink {
 	return &sink{
-		hubURL: hubURL,
-		node:   node,
-		log:    log,
-		ch:     make(chan *api.Entry, 1024),
+		hubURL:   hubURL,
+		hubToken: hubToken,
+		node:     node,
+		log:      log,
+		ch:       make(chan *api.Entry, 1024),
 	}
 }
 
@@ -55,18 +70,35 @@ func (s *sink) emit(e *api.Entry) {
 	}
 }
 
-// run maintains the connection and drains the buffer until ctx-less stop.
-func (s *sink) run() {
+// run maintains the connection and drains the buffer until ctx is cancelled.
+func (s *sink) run(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if err := s.connect(); err != nil {
 			s.log.Debug("hub connect failed, retrying", "url", s.hubURL, "err", err)
-			time.Sleep(2 * time.Second)
+			if !sleepCtx(ctx, 2*time.Second) {
+				return
+			}
 			continue
 		}
 		s.log.Info("connected to hub", "url", s.hubURL)
-		s.pump()
+		s.pump(ctx)
 		s.log.Debug("hub connection lost, reconnecting")
-		time.Sleep(1 * time.Second)
+		if !sleepCtx(ctx, time.Second) {
+			return
+		}
+	}
+}
+
+// sleepCtx waits d, returning false if ctx was cancelled first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
@@ -75,7 +107,11 @@ func (s *sink) connect() error {
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	var hdr http.Header
+	if s.hubToken != "" {
+		hdr = http.Header{"Authorization": {"Bearer " + s.hubToken}}
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), hdr)
 	if err != nil {
 		return err
 	}
@@ -90,8 +126,9 @@ func (s *sink) connect() error {
 	return conn.WriteMessage(websocket.TextMessage, hello)
 }
 
-// pump writes buffered entries to the current connection until it errors.
-func (s *sink) pump() {
+// pump writes buffered entries (plus a periodic self-report frame) to the
+// current connection until it errors or ctx is cancelled.
+func (s *sink) pump(ctx context.Context) {
 	s.mu.Lock()
 	conn := s.conn
 	s.mu.Unlock()
@@ -100,16 +137,43 @@ func (s *sink) pump() {
 	}
 	defer conn.Close()
 
-	for e := range s.ch {
-		b, err := json.Marshal(api.Envelope{Type: api.MsgEntry, Entry: e})
-		if err != nil {
-			continue
-		}
+	write := func(b []byte) error {
 		conn.SetWriteDeadline(time.Now().Add(sinkWriteTimeout))
-		if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
-			// Requeue the entry we failed to send, then bail to reconnect.
-			s.emit(e)
+		return conn.WriteMessage(websocket.TextMessage, b)
+	}
+
+	stats := time.NewTicker(sinkStatsInterval)
+	defer stats.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-stats.C:
+			b, err := json.Marshal(api.Envelope{Type: api.MsgWorkerStats, WorkerStats: &api.WorkerStats{
+				Node:        s.node,
+				EntriesSent: s.sent.Load(),
+				Dropped:     s.dropped.Load(),
+				CaptureLive: s.captureLive.Load(),
+				CaptureTLS:  s.captureTLS.Load(),
+			}})
+			if err != nil {
+				continue
+			}
+			if write(b) != nil {
+				return
+			}
+		case e := <-s.ch:
+			b, err := json.Marshal(api.Envelope{Type: api.MsgEntry, Entry: e})
+			if err != nil {
+				continue
+			}
+			if write(b) != nil {
+				// Requeue the entry we failed to send, then bail to reconnect.
+				s.emit(e)
+				return
+			}
+			s.sent.Add(1)
 		}
 	}
 }
