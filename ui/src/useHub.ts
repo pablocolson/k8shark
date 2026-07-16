@@ -145,13 +145,20 @@ export function useHub(initialFilter: string): HubState {
     };
   }, [connect, cancelScheduledFlush]);
 
-  // If a flush is sitting in the hidden-tab setTimeout fallback when the tab
-  // comes back to the foreground, don't make the user wait out the rest of the
-  // (throttled, up to ~1s) interval — reschedule immediately via rAF instead.
+  // Keep the scheduled flush mechanism matched to the current visibility
+  // state, in both directions: a timeout fallback still pending after the tab
+  // comes back to the foreground shouldn't make the user wait out the rest of
+  // its (throttled, up to ~1s) interval, and — symmetrically — a rAF still
+  // pending right as the tab goes to the background must be migrated to the
+  // timeout fallback, since that rAF may never fire once hidden (the whole
+  // reason scheduleFlush avoids rAF while hidden in the first place). Either
+  // way, cancel and reschedule immediately rather than leaving a stale/stuck
+  // timer in place.
   useEffect(() => {
     const onVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      if (frameRef.current === null || frameKindRef.current !== "timeout") return;
+      if (frameRef.current === null) return;
+      const wantKind = document.visibilityState === "hidden" ? "timeout" : "raf";
+      if (frameKindRef.current === wantKind) return;
       cancelScheduledFlush();
       scheduleFlush();
     };

@@ -154,6 +154,36 @@ describe("useHub background-tab flush", () => {
     expect(latest?.entries.map((e) => e.id)).toEqual(["e1"]);
   });
 
+  it("migrates a rAF flush already pending when the tab goes hidden to the timeout fallback, instead of leaving it stuck", () => {
+    const ws = FakeWebSocket.instances[0];
+
+    // Entry arrives while visible -> schedules via rAF, exactly as continuous
+    // live traffic would (there's essentially always a flush in flight).
+    act(() => {
+      ws.emit({ type: "entry", entry: fakeEntry("e1") });
+    });
+    expect(rafStub).toHaveBeenCalledTimes(1);
+
+    // Tab is backgrounded before that rAF ever fires — the scenario the whole
+    // fix exists for. Without migrating the pending rAF, it would simply never
+    // run once the document is hidden (rAF is suspended, not just throttled),
+    // and entries would pile up in bufRef forever.
+    setVisibility("hidden");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // The stale rAF was cancelled and replaced by a timeout fallback.
+    expect(cafStub).toHaveBeenCalledTimes(1);
+    expect(rafStub).toHaveBeenCalledTimes(1); // no second rAF scheduled
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(latest?.entries.map((e) => e.id)).toEqual(["e1"]);
+  });
+
   it("catches up immediately on visibilitychange instead of waiting out the background timer", () => {
     setVisibility("hidden");
     const ws = FakeWebSocket.instances[0];
