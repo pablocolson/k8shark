@@ -26,6 +26,19 @@ spec:
               value: k8shark-hub.{{ .Release.Namespace }}.svc
             - name: HUB_PORT
               value: "{{ .Values.hub.port }}"
+            # HUB_TOKEN is injected as a Bearer header on proxied requests, so
+            # the dashboard keeps working when hub.apiToken is set (the front
+            # service then becomes the intended access path to the data).
+            {{- if .Values.hub.apiToken }}
+            - name: HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: token
+            {{- else }}
+            - name: HUB_TOKEN
+              value: ""
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.front.port }}

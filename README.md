@@ -104,13 +104,19 @@ registry/tag, plus how to wire an `imagePullSecrets` for a private registry.
 | `k8shark console` | Stream component logs (`--component hub\|worker\|front`). |
 | `k8shark hub` | Run the hub server (used by the hub container). `--port`, `--serve-ui <dir>` for local dev. |
 | `k8shark worker` | Run the node worker (used by the worker DaemonSet). See flags below. |
-| `k8shark mcp` | Run an MCP server exposing captured traffic to AI agents (`get_stats`, `list_entries`, `get_entry`, `list_namespaces`, `list_workloads`). |
+| `k8shark mcp` | Run an MCP server exposing captured traffic to AI agents (`get_stats`, `list_entries`, `get_entry`, `get_traffic_summary`, `get_timeline`, `get_workers`, `list_filter_fields`, `list_namespaces`, `list_workloads`). `--hub-token` when the hub requires auth. |
 | `k8shark version` | Print the version. |
 
 Worker flags of note: `--demo` / `--demo-rps` (synthetic traffic, opt-in
 only), `--redis-ports` / `--valkey-ports` / `--amqp-ports` (extra ports for
 those protocols), `--capture-bodies` / `--body-bytes` / `--raw-bytes`
-(capture-depth bounds), `--enable-tls` / `--proc-root` (eBPF TLS capture).
+(capture-depth bounds), `--redact-headers` (scrub credential-bearing HTTP
+headers, on by default), `--enable-tls` / `--proc-root` (eBPF TLS capture),
+`--hub-token` (hub auth).
+
+Hub flags of note: `--buffer` (in-memory entry ring size), `--api-token`
+(require a bearer token on `/api` and the WebSocket endpoints; also read from
+`$K8SHARK_API_TOKEN`).
 
 ## Configuration (Helm values)
 
@@ -120,12 +126,14 @@ those protocols), `--capture-bodies` / `--body-bytes` / `--raw-bytes`
 | `image.tag` | `latest` | Image tag — pin this for real deployments (`latest` + `IfNotPresent` silently no-ops on upgrade). |
 | `hub.port` | `8898` | Hub listen port. |
 | `hub.replicas` | `1` | Hub replica count (state is per-pod; there is no shared backing store). |
+| `hub.bufferSize` | `0` | Entry ring size (`0` = 10000). ~10s of history at 1k entries/s — raise for busy clusters. |
+| `hub.apiToken` | `""` | When set, `/api` + WebSockets require this bearer token; workers and the front proxy get it via a Secret. |
 | `pdb.enabled` | `true` | PodDisruptionBudget protecting the hub during node drains. |
 | `worker.demo` | `false` | Generate synthetic traffic instead of capturing (opt-in only). |
 | `worker.iface` | `""` | Capture interface (`""` = any). |
 | `worker.privileged` | `true` | AF_PACKET needs elevated privileges + host network. |
 | `worker.valkeyPorts` / `worker.amqpPorts` | `[]` | Extra RESP/AMQP ports beyond the 6379/5672 defaults. |
-| `worker.capture.*` | see values.yaml | Per-direction body/raw capture-depth bounds. |
+| `worker.capture.*` | see values.yaml | Per-direction body/raw capture-depth bounds + header redaction (`redactHeaders`, default on). |
 | `worker.tls.enabled` | `false` | Attach eBPF uprobes to OpenSSL/boringssl to decrypt TLS traffic. Needs `hostPID` + `BPF`/`PERFMON`/`SYS_ADMIN`/`SYS_RESOURCE`/`SYS_PTRACE` and a node with BTF. |
 | `worker.tls.goTLS` | `false` | Go `crypto/tls` uprobes — not implemented yet. |
 

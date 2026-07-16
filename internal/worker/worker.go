@@ -19,11 +19,12 @@ import (
 
 // Options configures a worker run.
 type Options struct {
-	HubURL  string // ws:// URL of the hub worker endpoint
-	Node    string // node name this worker reports as
-	Iface   string // capture interface ("" = any)
-	Demo    bool   // force synthetic traffic instead of live capture
-	DemoRPS int    // synthetic entries/sec in demo mode
+	HubURL   string // ws:// URL of the hub worker endpoint
+	HubToken string // bearer token for the hub connection ("" = no auth)
+	Node     string // node name this worker reports as
+	Iface    string // capture interface ("" = any)
+	Demo     bool   // force synthetic traffic instead of live capture
+	DemoRPS  int    // synthetic entries/sec in demo mode
 
 	// RESP (Redis wire protocol) port labelling. Valkey and Redis are wire
 	// identical, so the label is operator-supplied config, not wire-detected.
@@ -36,6 +37,12 @@ type Options struct {
 	CaptureBodies bool // capture & render request/response bodies (default true)
 	BodyBytes     int  // per-direction body cap (0 => DefaultBodyCaptureBytes)
 	RawBytes      int  // per-direction raw hex cap (0 => DefaultRawCaptureBytes; <0 disables raw)
+
+	// RedactHeaders scrubs the values of well-known credential-bearing HTTP
+	// headers (authorization, cookie, ...) from captured entries. Note the raw
+	// hex view still contains the original bytes — set RawBytes < 0 to close
+	// that path too.
+	RedactHeaders bool
 
 	// eBPF TLS uprobe capture (hybrid layer, additive to AF_PACKET). Off by
 	// default: AF_PACKET alone is unaffected either way. Linux-only; a
@@ -50,8 +57,8 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	if opts.DemoRPS <= 0 {
 		opts.DemoRPS = 25
 	}
-	s := newSink(opts.HubURL, opts.Node, log)
-	go s.run()
+	s := newSink(opts.HubURL, opts.HubToken, opts.Node, log)
+	go s.run(ctx)
 
 	stop := ctx.Done()
 
@@ -83,6 +90,7 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	} else {
 		src = live
 		defer src.Close()
+		s.captureLive.Store(true)
 		log.Info("AF_PACKET capture started", "node", opts.Node, "iface", opts.Iface)
 	}
 
@@ -91,6 +99,7 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	tlsUp := false
 	if opts.EnableTLS {
 		tlsUp = startTLSCapture(ctx, log, p, opts)
+		s.captureTLS.Store(tlsUp)
 	}
 
 	if src == nil && !tlsUp {
@@ -135,6 +144,10 @@ func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture
 			if !ok {
 				// AF_PACKET stream ended; stop selecting on it but keep the gc
 				// loop alive for any eBPF TLS capture still feeding the pipeline.
+				// A dead capture must be loud — and visible at /api/workers.
+				log.Error("AF_PACKET packet stream ended — live capture stopped",
+					"hint", "no further plaintext traffic will be reported by this worker")
+				p.sink.captureLive.Store(false)
 				packets = nil
 				continue
 			}

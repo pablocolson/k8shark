@@ -109,7 +109,7 @@ func TestRedisRESPRendering(t *testing.T) {
 }
 
 func TestRedisPairingEndToEnd(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40000, redisPort)
 
@@ -137,7 +137,7 @@ func TestRedisPairingEndToEnd(t *testing.T) {
 // emitting ProtocolRedis on port 6379, proving the Valkey feature is
 // backward-compatible and opt-in only.
 func TestConsumeStreamDefaultPortIsRedis(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40020, redisPort)
 
@@ -160,7 +160,7 @@ func TestConsumeStreamDefaultPortIsRedis(t *testing.T) {
 // --valkey-ports) as Valkey must emit ProtocolValkey entries, even though the
 // bytes on the wire are indistinguishable from Redis.
 func TestConsumeStreamConfiguredPortIsValkey(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	const valkeyPort = 16379
 	p.respPorts = buildRespPorts(nil, []int{valkeyPort})
@@ -219,7 +219,7 @@ func pgStartup() []byte { // SSLRequest: len=8, code=80877103
 }
 
 func TestPostgresPairingEndToEnd(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40001, pgPort)
 
@@ -259,7 +259,7 @@ func TestPostgresPairingEndToEnd(t *testing.T) {
 }
 
 func TestPostgresError(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40002, pgPort)
 
@@ -310,7 +310,7 @@ func TestRESP3MapSingleReply(t *testing.T) {
 
 // An unsolicited pub/sub message must not steal a pending request's response.
 func TestRedisPubSubNotMispaired(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40010, redisPort)
 
@@ -392,7 +392,7 @@ func pgRowDesc(cols ...pgCol) []byte {
 
 // Extended-query Parse+Bind+Execute -> typed params/columns/tag on the entry.
 func TestPostgresExtendedDetail(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40030, pgPort)
 
@@ -432,7 +432,7 @@ func TestPostgresExtendedDetail(t *testing.T) {
 
 // ErrorResponse -> typed PGError fields.
 func TestPostgresErrorDetail(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40031, pgPort)
 
@@ -462,7 +462,7 @@ func TestPostgresErrorDetail(t *testing.T) {
 // SELECT n + pipelined GET + RESP3 attribute reply -> DBIndex/PipelineDepth/
 // ReplyType/Attributes.
 func TestRedisDetail(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40040, redisPort)
 
@@ -507,7 +507,7 @@ func TestRESP3MapReplyType(t *testing.T) {
 
 // A NOERROR response with multiple A answers -> DNSDetail.Answers/Rcode.
 func TestDNSAnswerDetail(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	reqNet, _, respNet, _ := flows(50000, 53)
 
@@ -547,7 +547,7 @@ func TestDNSAnswerDetail(t *testing.T) {
 }
 
 func TestDNSNXDomainDetail(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	reqNet, _, respNet, _ := flows(50001, 53)
 
@@ -604,7 +604,7 @@ const amqpHeader = "AMQP\x00\x00\x09\x01"
 
 // Basic.Publish + content header + body -> one entry with exchange/rk/body.
 func TestAMQPBasicPublish(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, _, _ := flows(40100, amqpPort)
 
@@ -649,7 +649,7 @@ func TestAMQPBasicPublish(t *testing.T) {
 
 // Queue.Declare surfaces without any content frames.
 func TestAMQPQueueDeclare(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, _, _ := flows(40101, amqpPort)
 
@@ -674,7 +674,7 @@ func TestAMQPQueueDeclare(t *testing.T) {
 
 // Connection.Close with a >=400 reply-code is an error entry.
 func TestAMQPConnectionCloseIsError(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, _, _ := flows(40102, amqpPort)
 
@@ -698,7 +698,7 @@ func TestAMQPConnectionCloseIsError(t *testing.T) {
 
 // A frame whose frame-end byte != 0xCE (garbled/TLS) must bail without emitting.
 func TestAMQPFramingGuard(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, _, _ := flows(40103, amqpPort)
 
@@ -714,7 +714,7 @@ func TestAMQPFramingGuard(t *testing.T) {
 
 // An AMQP 1.0 protocol header must be detected and skipped (no entries, no panic).
 func TestAMQP10Skipped(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, _, _ := flows(40104, amqpPort)
 
@@ -728,7 +728,7 @@ func TestAMQP10Skipped(t *testing.T) {
 
 // A port configured as Valkey emits ProtocolValkey entries (label-only relabel).
 func TestValkeyLabel(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	p.respPorts = buildRespPorts(nil, []int{6380})
 	rNet, rTr, sNet, sTr := flows(40105, 6380)
@@ -748,7 +748,7 @@ func TestValkeyLabel(t *testing.T) {
 // sslmode=prefer against a non-TLS server sends SSLRequest THEN a plaintext
 // StartupMessage — two consecutive untyped messages. Both must be skipped.
 func TestPostgresSSLPreferDoubleUntyped(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40011, pgPort)
 
@@ -773,7 +773,7 @@ func TestPostgresSSLPreferDoubleUntyped(t *testing.T) {
 // smaller than) the total ElapsedMs — a real gap between the two consumeHTTP
 // calls proves it's an actual duration, not a dead always-zero field.
 func TestHTTPTTFB(t *testing.T) {
-	s := newSink("", "n", discardLogger())
+	s := newSink("", "", "n", discardLogger())
 	p := newPipeline(s, "n", discardLogger())
 	rNet, rTr, sNet, sTr := flows(40200, 80)
 

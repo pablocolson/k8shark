@@ -261,7 +261,13 @@ func (p *parser) parseComparison() (Predicate, error) {
 	p.pos++
 	val := valTok.val
 
+	// An unknown field must be a compile error, not a silent match-nothing: a
+	// typo like `http.status_code == 500` returning zero entries reads as "no
+	// errors" to whoever wrote it.
 	getter := fieldGetter(field)
+	if getter == nil {
+		return nil, fmt.Errorf("unknown filter field %q (GET /api/fields lists the catalog)", field)
+	}
 	return func(e *api.Entry) bool {
 		return compare(getter(e), op, val)
 	}, nil
@@ -293,7 +299,7 @@ func compare(actual, op, want string) bool {
 }
 
 // fieldGetter resolves a dotted field path to an accessor. Unknown fields
-// return "".
+// return nil (rejected at filter compile; skipped by the facet index).
 func fieldGetter(field string) func(*api.Entry) string {
 	switch strings.ToLower(field) {
 	case "protocol":
@@ -302,6 +308,8 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Node }
 	case "status":
 		return func(e *api.Entry) string { return e.Status }
+	case "elapsedms", "elapsed", "latency":
+		return func(e *api.Entry) string { return strconv.FormatInt(e.ElapsedMs, 10) }
 	case "src.ip":
 		return func(e *api.Entry) string { return e.Source.IP }
 	case "src.port":
@@ -310,6 +318,8 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Source.Name }
 	case "src.namespace", "src.ns":
 		return func(e *api.Entry) string { return e.Source.Namespace }
+	case "src.workload":
+		return func(e *api.Entry) string { return e.Source.Workload }
 	case "dst.ip":
 		return func(e *api.Entry) string { return e.Destination.IP }
 	case "dst.port":
@@ -318,6 +328,8 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Destination.Name }
 	case "dst.namespace", "dst.ns":
 		return func(e *api.Entry) string { return e.Destination.Namespace }
+	case "dst.workload":
+		return func(e *api.Entry) string { return e.Destination.Workload }
 	case "http.method", "request.method", "method":
 		return func(e *api.Entry) string { return e.Request.Method }
 	case "http.path", "request.path", "path":
@@ -423,6 +435,13 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string {
 			if e.L4 != nil {
 				return strconv.FormatFloat(e.L4.RTTMs, 'f', -1, 64)
+			}
+			return ""
+		}
+	case "l4.durationms":
+		return func(e *api.Entry) string {
+			if e.L4 != nil {
+				return strconv.FormatInt(e.L4.DurationMs, 10)
 			}
 			return ""
 		}
@@ -539,13 +558,6 @@ func fieldGetter(field string) func(*api.Entry) string {
 			}
 			return strconv.FormatUint(uint64(e.L4.AckStart), 10)
 		}
-	case "l4.durationms":
-		return func(e *api.Entry) string {
-			if e.L4 == nil {
-				return ""
-			}
-			return strconv.FormatInt(e.L4.DurationMs, 10)
-		}
 	case "l4.clientpackets":
 		return func(e *api.Entry) string {
 			if e.L4 == nil {
@@ -562,7 +574,7 @@ func fieldGetter(field string) func(*api.Entry) string {
 		}
 
 	default:
-		return func(*api.Entry) string { return "" }
+		return nil
 	}
 }
 

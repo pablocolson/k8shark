@@ -183,11 +183,53 @@ func (s *store) stats(workers int) api.Stats {
 		recent++
 	}
 
+	w1, w5 := s.windows(time.Now())
+
 	return api.Stats{
 		TotalEntries:  s.total,
 		EntriesPerSec: float64(recent) / 5.0,
 		Workers:       workers,
 		ByProtocol:    byProto,
 		ByStatus:      byStatus,
+		Last1m:        w1,
+		Last5m:        w5,
 	}
+}
+
+// windows tallies the trailing 1m/5m slices by walking the ring newest-first.
+// Entries land in arrival order, which tracks capture time closely enough for
+// coarse windows, so the walk stops at the first entry older than 5m. Caller
+// holds at least RLock.
+func (s *store) windows(now time.Time) (last1m, last5m *api.WindowStats) {
+	cut1, cut5 := now.Add(-time.Minute), now.Add(-5*time.Minute)
+	w1, w5 := &api.WindowStats{}, &api.WindowStats{}
+	n := s.capacity
+	if !s.full {
+		n = s.next
+	}
+	for i := 0; i < n; i++ {
+		e := s.buf[(s.next-1-i+s.capacity)%s.capacity]
+		if e == nil {
+			continue
+		}
+		if e.Timestamp.Before(cut5) {
+			break
+		}
+		tally := func(w *api.WindowStats) {
+			w.Entries++
+			switch e.Status {
+			case "error":
+				w.Errors++
+			case "warning":
+				w.Warnings++
+			}
+		}
+		tally(w5)
+		if !e.Timestamp.Before(cut1) {
+			tally(w1)
+		}
+	}
+	w1.EntriesPerSec = float64(w1.Entries) / 60.0
+	w5.EntriesPerSec = float64(w5.Entries) / 300.0
+	return w1, w5
 }
