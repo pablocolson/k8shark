@@ -49,7 +49,11 @@ export function FilterBar({
   const [caret, setCaret] = useState(value.length);
   const [focused, setFocused] = useState(false);
   const [open, setOpen] = useState(false);
-  const [highlightIndex, setHighlightIndex] = useState(0);
+  // -1 means no suggestion is highlighted: Enter submits the filter as
+  // typed instead of picking one (see the reset effect and handleKeyDown's
+  // Enter case below — auto-highlighting index 0 made Enter silently pick a
+  // suggestion instead of applying an already-complete, valid filter).
+  const [highlightIndex, setHighlightIndex] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -65,7 +69,7 @@ export function FilterBar({
   // the dropdown only while the input is actually focused (avoids it
   // reappearing after a filter is applied and focus has moved elsewhere).
   useEffect(() => {
-    setHighlightIndex(0);
+    setHighlightIndex(-1);
     setOpen(focused && (items.length > 0 || !!hint));
   }, [focused, items, hint]);
 
@@ -97,9 +101,14 @@ export function FilterBar({
         return;
       case "ArrowUp":
         e.preventDefault();
-        setHighlightIndex((i) => (i - 1 + items.length) % items.length);
+        setHighlightIndex((i) => (i <= 0 ? items.length - 1 : i - 1));
         return;
       case "Enter": {
+        // Only intercept Enter when the user has actually navigated to a
+        // suggestion (highlightIndex >= 0); otherwise let it fall through to
+        // the form's onSubmit so a fully-typed, valid filter applies on
+        // Enter like any other text input, instead of silently picking
+        // whatever suggestion happens to be listed first.
         const item = items[highlightIndex];
         if (item) {
           e.preventDefault();

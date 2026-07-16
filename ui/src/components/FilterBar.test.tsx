@@ -41,6 +41,42 @@ describe("FilterBar", () => {
     expect(onApply).toHaveBeenCalledWith('protocol == "http"');
   });
 
+  it("submits on Enter even when the value just typed still matches a suggestion", async () => {
+    // Regression test: right after typing a value's closing quote, the caret
+    // is still inside the "value" token, so the autocomplete re-offers
+    // tracked values matching what's already been typed — trivially
+    // including the exact value itself. That leaves the dropdown open with
+    // an (unnavigated) item any time the typed value happens to prefix-match
+    // a known one. Enter used to always intercept that case (silently
+    // picking item 0) instead of submitting, so applying a filter by typing
+    // it and pressing Enter — the obvious way to do it — could silently do
+    // nothing.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              fields: [{ name: "protocol", type: "enum", operators: ["==", "!="], values: [{ value: "http", count: 10 }] }],
+            }),
+        })
+      )
+    );
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(<FilterBar {...baseProps} onApply={onApply} />);
+
+    const input = screen.getByRole("combobox", { name: /ifl filter/i });
+    await user.type(input, 'protocol == "http"');
+    expect(screen.getByRole("listbox")).toBeInTheDocument(); // dropdown is open, unnavigated
+    expect(screen.getByRole("option")).toHaveTextContent("http");
+
+    await user.keyboard("{Enter}");
+
+    expect(onApply).toHaveBeenCalledWith('protocol == "http"');
+  });
+
   it("applies an example chip verbatim", async () => {
     const user = userEvent.setup();
     const onApply = vi.fn();
