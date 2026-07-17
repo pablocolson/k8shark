@@ -261,6 +261,23 @@ func (p *parser) parseComparison() (Predicate, error) {
 	p.pos++
 	val := valTok.val
 
+	// namespace/ns matches either side (src or dst) rather than a single
+	// struct field, so it can't go through the single-getter-then-compare
+	// path below. == and contains are true if EITHER side matches
+	// (inclusion, "show me shop traffic wherever it touches shop"); != is
+	// true only if NEITHER side matches (exclusion, "hide kube-system
+	// noise") — the useful reading, not the De Morgan-literal "either side
+	// differs" (which would be true for nearly every entry).
+	fieldLower := strings.ToLower(field)
+	if fieldLower == "namespace" || fieldLower == "ns" {
+		return func(e *api.Entry) bool {
+			if op == "!=" {
+				return !compare(e.Source.Namespace, "==", val) && !compare(e.Destination.Namespace, "==", val)
+			}
+			return compare(e.Source.Namespace, op, val) || compare(e.Destination.Namespace, op, val)
+		}, nil
+	}
+
 	// An unknown field must be a compile error, not a silent match-nothing: a
 	// typo like `http.status_code == 500` returning zero entries reads as "no
 	// errors" to whoever wrote it.
@@ -302,6 +319,19 @@ func compare(actual, op, want string) bool {
 // return nil (rejected at filter compile; skipped by the facet index).
 func fieldGetter(field string) func(*api.Entry) string {
 	switch strings.ToLower(field) {
+	case "namespace", "ns":
+		// The real either-side match/exclude logic lives in parseComparison
+		// (which intercepts "namespace"/"ns" before ever calling this), so
+		// this getter is never used for actual comparisons — it exists only
+		// so the facet index has something to sample for tracked-value
+		// autocomplete. Falls back to dst so a namespace that's only ever a
+		// destination (e.g. one that solely receives traffic) still shows up.
+		return func(e *api.Entry) string {
+			if e.Source.Namespace != "" {
+				return e.Source.Namespace
+			}
+			return e.Destination.Namespace
+		}
 	case "protocol":
 		return func(e *api.Entry) string { return string(e.Protocol) }
 	case "node":

@@ -56,6 +56,7 @@ var fieldCatalog = []FieldSpec{
 		EnumValues: []string{"success", "warning", "error"}},
 	{Name: "node", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "elapsedMs", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	{Name: "namespace", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.name", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.namespace", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "src.workload", Type: FieldTypeString, Operators: opsString, TrackValues: true},

@@ -56,6 +56,42 @@ func TestCompileFilter(t *testing.T) {
 	}
 }
 
+// TestNamespaceFilter exercises the bare "namespace"/"ns" field, which
+// matches either src or dst rather than a single struct field — sample()
+// isn't useful here since both sides share the same namespace, so this uses
+// an entry with two distinct ones.
+func TestNamespaceFilter(t *testing.T) {
+	e := &api.Entry{
+		Source:      api.Endpoint{Namespace: "shop"},
+		Destination: api.Endpoint{Namespace: "platform"},
+	}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`namespace == "shop"`, true},       // matches src
+		{`namespace == "platform"`, true},   // matches dst
+		{`namespace == "kube-system"`, false}, // matches neither
+		{`ns == "shop"`, true},              // alias
+		{`namespace contains "plat"`, true}, // substring on dst
+		// != means "neither side matches" (exclude noise), not the De
+		// Morgan-literal "either side differs" (which response.status-style
+		// != would make true for nearly every entry here).
+		{`namespace != "shop"`, false},        // src does match "shop"
+		{`namespace != "kube-system"`, true},  // neither side is kube-system
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
 // richEntry exercises the WS3 sub-object filter fields.
 func richEntry() *api.Entry {
 	return &api.Entry{
