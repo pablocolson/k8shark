@@ -98,8 +98,12 @@ func (p *pipeline) pgRequests(br *bufio.Reader, cr *capReader, key string, src, 
 			if q == "" {
 				q = "EXECUTE"
 			}
+			params := lastParams
+			if p.redactPGParams {
+				params = redactedParams(len(params))
+			}
 			pl := pgQueryPayload(q, rawOf(cr))
-			pl.Postgres = &api.PGDetail{StatementName: lastStmt, Portal: lastPortal, Params: lastParams}
+			pl.Postgres = &api.PGDetail{StatementName: lastStmt, Portal: lastPortal, Params: params}
 			p.enqueueRequest(key, api.ProtocolPostgres, pl, src, dst)
 			lastParams = nil // params belong to one execution
 		case 'X': // Terminate
@@ -236,6 +240,23 @@ const pgMaxBindParams = 1 << 16
 // parameter values from a Bind message payload. Text params are rendered as-is,
 // binary params as "\x<hex>"; NULL params as "(null)". It is fully
 // bounds-checked and never panics on a short/garbled payload.
+// redactedParams returns n placeholder values, used in place of a Bind
+// message's actual parameter values when redactPGParams is on. Bind params
+// are positional (no name attached at the wire level, unlike an HTTP header
+// or query param), so there is no way to redact only the sensitive ones —
+// this is deliberately all-or-nothing. The count is preserved rather than
+// collapsing to a single marker so "this call bound 3 params" stays visible.
+func redactedParams(n int) []string {
+	if n == 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = redactedValue
+	}
+	return out
+}
+
 func pgParseBind(b []byte) (portal, stmt string, params []string) {
 	portal, b = pgSplitCStr(b)
 	stmt, b = pgSplitCStr(b)

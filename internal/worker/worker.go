@@ -39,10 +39,19 @@ type Options struct {
 	RawBytes      int  // per-direction raw hex cap (0 => DefaultRawCaptureBytes; <0 disables raw)
 
 	// RedactHeaders scrubs the values of well-known credential-bearing HTTP
-	// headers (authorization, cookie, ...) from captured entries. Note the raw
-	// hex view still contains the original bytes — set RawBytes < 0 to close
-	// that path too.
+	// headers (authorization, cookie, ...), sensitive HTTP query params
+	// (token, api_key, ...) and RESP auth command arguments (AUTH, HELLO's
+	// AUTH clause, CONFIG SET requirepass/masterauth) from captured entries.
+	// Note the raw hex view still contains the original bytes — set
+	// RawBytes < 0 to close that path too.
 	RedactHeaders bool
+
+	// RedactPGParams replaces every Postgres Bind parameter value with
+	// [REDACTED]. Off by default, unlike RedactHeaders: Bind params carry no
+	// name at the wire level, so redaction can't target just the sensitive
+	// ones — it's all params or none, which trades away query-value
+	// visibility that's usually the point of watching Postgres traffic.
+	RedactPGParams bool
 
 	// eBPF TLS uprobe capture (hybrid layer, additive to AF_PACKET). Off by
 	// default: AF_PACKET alone is unaffected either way. Linux-only; a

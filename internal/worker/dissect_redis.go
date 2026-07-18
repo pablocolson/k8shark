@@ -65,6 +65,12 @@ func (p *pipeline) consumeRedisID(c connID, r io.Reader, isRequest bool, proto a
 					p.setRedisDB(key, n)
 				}
 			}
+			if p.redactHeaders {
+				if redacted, ok := redactSensitiveRedisArgs(args); ok {
+					args = redacted
+					cmd = strings.Join(redacted, " ")
+				}
+			}
 			p.enqueueRequest(key, proto, api.Payload{
 				Command: cmd,
 				Summary: truncate(cmd, 160),
@@ -328,6 +334,51 @@ func redisArgs(v respVal) []string {
 		}
 		return nil
 	}
+}
+
+// redactSensitiveRedisArgs scrubs the credential VALUE positions in a RESP
+// command's arguments — AUTH's password, HELLO's "... AUTH user pass"
+// clause, and CONFIG SET requirepass/masterauth's new value — while keeping
+// the command and any non-credential arguments visible, matching how header
+// redaction keeps header names but scrubs values. Returns the original slice
+// and ok=false when args isn't one of these shapes, so the caller can tell
+// "nothing to redact" apart from "redacted to an empty/unchanged result".
+func redactSensitiveRedisArgs(args []string) (out []string, ok bool) {
+	if len(args) < 2 {
+		return args, false
+	}
+	switch strings.ToUpper(args[0]) {
+	case "AUTH":
+		// AUTH password | AUTH username password (Redis 6+ ACL form).
+		out = append([]string(nil), args...)
+		for i := 1; i < len(out); i++ {
+			out[i] = redactedValue
+		}
+		return out, true
+	case "HELLO":
+		// HELLO [protover [AUTH username password] [SETNAME name]]
+		for i, a := range args {
+			if !strings.EqualFold(a, "AUTH") {
+				continue
+			}
+			out = append([]string(nil), args...)
+			for j := i + 1; j < len(out) && j < i+3; j++ {
+				out[j] = redactedValue
+			}
+			return out, true
+		}
+		return args, false
+	case "CONFIG":
+		if len(args) >= 4 && strings.EqualFold(args[1], "SET") &&
+			(strings.EqualFold(args[2], "requirepass") || strings.EqualFold(args[2], "masterauth")) {
+			out = append([]string(nil), args...)
+			for i := 3; i < len(out); i++ {
+				out[i] = redactedValue
+			}
+			return out, true
+		}
+	}
+	return args, false
 }
 
 // respTypeName names a RESP type byte for the detail pane.

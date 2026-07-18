@@ -54,6 +54,9 @@ spec:
             {{- if not .Values.worker.capture.redactHeaders }}
             - --redact-headers=false
             {{- end }}
+            {{- if .Values.worker.capture.redactPGParams }}
+            - --redact-pg-params=true
+            {{- end }}
             {{- if .Values.worker.capture.bodyBytes }}
             - --body-bytes={{ .Values.worker.capture.bodyBytes }}
             {{- end }}

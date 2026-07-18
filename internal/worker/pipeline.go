@@ -63,9 +63,20 @@ type pipeline struct {
 	rawCap        int // max raw hex bytes per direction (<0 disables raw capture)
 	headerHexCap  int // max L2/L3/L4 header hexdump bytes
 
-	// redactHeaders scrubs credential-bearing HTTP header values (the raw hex
-	// view is separate — disable it via rawCap < 0 for full scrubbing).
+	// redactHeaders scrubs credential-bearing HTTP header values, query
+	// params and RESP auth command arguments (the raw hex view is separate —
+	// disable it via rawCap < 0 for full scrubbing).
 	redactHeaders bool
+
+	// redactPGParams replaces every Postgres Bind parameter value with
+	// [REDACTED] (see pgResponses' 'E' case) when set. Unlike redactHeaders,
+	// this defaults off: Bind params are positional wire values with no
+	// name attached, so there's no way to redact just the sensitive ones —
+	// only a blanket replace-everything is possible, which throws away
+	// query-value visibility that's usually the whole point of watching
+	// Postgres traffic. Opt in when queries in your cluster do carry
+	// unparameterized secrets in bind values.
+	redactPGParams bool
 }
 
 func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
@@ -92,6 +103,7 @@ func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
 func (p *pipeline) applyCaptureOpts(opts Options) {
 	p.captureBodies = opts.CaptureBodies
 	p.redactHeaders = opts.RedactHeaders
+	p.redactPGParams = opts.RedactPGParams
 	if opts.BodyBytes > 0 {
 		p.bodyCap = opts.BodyBytes
 	}
@@ -378,7 +390,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 		ct := req.Header.Get("Content-Type")
 		p.enqueueRequest(key, api.ProtocolHTTP, api.Payload{
 			Method:      req.Method,
-			Path:        req.URL.RequestURI(),
+			Path:        redactedRequestURI(req.URL, p.redactHeaders),
 			Host:        req.Host,
 			Headers:     p.flattenHeaders(req.Header),
 			Body:        body,
@@ -386,8 +398,8 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 			Size:        full,
 			ContentType: ct,
 			Raw:         rawOf(cr),
-			HTTP:        &api.HTTPDetail{Version: req.Proto, ContentType: ct, Query: parseQuery(req.URL)},
-			Summary:     req.Method + " " + req.URL.RequestURI(),
+			HTTP:        &api.HTTPDetail{Version: req.Proto, ContentType: ct, Query: parseQuery(req.URL, p.redactHeaders)},
+			Summary:     req.Method + " " + redactedRequestURI(req.URL, p.redactHeaders),
 		}, src, dst)
 	}
 }
@@ -626,8 +638,29 @@ func rawViewFromBytes(b []byte, cap int) *api.RawView {
 	}
 }
 
-// parseQuery renders a URL's query parameters as a flat map (nil if none).
-func parseQuery(u *url.URL) map[string]string {
+// sensitiveQueryParams are credential-bearing URL query parameter names
+// whose values are scrubbed when redaction is on (names are kept so a
+// scrubbed param's presence stays observable) — reuses redactHeaders rather
+// than a dedicated flag, since both are the same "don't leak HTTP
+// credentials into the capture" concern with the same safe default (on).
+var sensitiveQueryParams = map[string]bool{
+	"access_token":  true,
+	"api_key":       true,
+	"apikey":        true,
+	"auth":          true,
+	"client_secret": true,
+	"password":      true,
+	"refresh_token": true,
+	"secret":        true,
+	"session_token": true,
+	"sig":           true,
+	"signature":     true,
+	"token":         true,
+}
+
+// parseQuery renders a URL's query parameters as a flat map (nil if none),
+// scrubbing sensitiveQueryParams values when redact is on.
+func parseQuery(u *url.URL, redact bool) map[string]string {
 	if u == nil || u.RawQuery == "" {
 		return nil
 	}
@@ -637,9 +670,42 @@ func parseQuery(u *url.URL) map[string]string {
 	}
 	out := make(map[string]string, len(q))
 	for k, v := range q {
+		if redact && sensitiveQueryParams[strings.ToLower(k)] {
+			out[k] = redactedValue
+			continue
+		}
 		out[k] = strings.Join(v, ", ")
 	}
 	return out
+}
+
+// redactedRequestURI renders u's path+query the way url.URL.RequestURI()
+// does, but with sensitiveQueryParams values scrubbed — used for Path and
+// Summary, which otherwise embed the raw (unredacted) query string even
+// when HTTP.Query itself is scrubbed via parseQuery. Falls back to the
+// original RequestURI() when nothing needed scrubbing, since re-encoding an
+// untouched query string (net/url.Values.Encode sorts keys and re-escapes)
+// would otherwise change formatting for no reason.
+func redactedRequestURI(u *url.URL, redact bool) string {
+	if !redact || u.RawQuery == "" {
+		return u.RequestURI()
+	}
+	q := u.Query()
+	changed := false
+	for k := range q {
+		if sensitiveQueryParams[strings.ToLower(k)] {
+			q[k] = []string{redactedValue}
+			changed = true
+		}
+	}
+	if !changed {
+		return u.RequestURI()
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return path + "?" + q.Encode()
 }
 
 // sensitiveHeaders are credential-bearing headers whose values are scrubbed
