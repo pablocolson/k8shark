@@ -10,6 +10,18 @@
 Légende : impact fort/moyen/faible ; effort S (<1 j), M (1-3 j), L (>3 j).
 Statut `ajusté` = idée retenue mais constat ou approche corrigé par le vérificateur (voir la note).
 
+## État d'avancement
+
+**Phase 0 — terminée (9/9).** DIS-2, DIS-3, OPS-1, OPS-4, CAP-2, CAP-3, CAP-6,
+TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
+`f883234`).
+
+**Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
+implémentés (commits `ec1a47f`, `5a985d2`).
+
+**Phase 2 et suivantes — non commencées.** Prochain item logique par valeur/effort :
+**CAP-1** (filtre BPF kernel hardcodé).
+
 ## Phases proposées
 
 ### Phase 0 - Quick wins (~1 semaine)
