@@ -74,6 +74,12 @@ func runDemo(s *sink, node string, rps int, stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
+			if s.paused() {
+				// A demo worker is still a worker: the hub's pause/resume
+				// control (see sink.reader) can't tell it apart from a real
+				// one, so it stops "capturing" (generating) the same way.
+				continue
+			}
 			seq++
 			s.emit(genEntry(rnd, node, seq))
 		}

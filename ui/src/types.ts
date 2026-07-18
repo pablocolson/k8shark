@@ -185,6 +185,23 @@ export interface StatsPoint {
   totalEntries: number;
 }
 
+// WorkerInfo is one row of GET /api/workers.
+export interface WorkerInfo {
+  node: string;
+  version?: string;
+  connected: boolean;
+  connectedAt: string;
+  lastSeen: string;
+  entries: number;
+  dropped: number;
+  captureLive: boolean;
+  captureTls: boolean;
+  capturePaused: boolean;
+  ringPackets: number;
+  ringDrops: number;
+  flowsEvicted: number;
+}
+
 export interface Envelope {
   type: "entry" | "stats" | "hello" | "filter" | "filterError";
   entry?: Entry;

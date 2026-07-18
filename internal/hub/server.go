@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -47,10 +48,13 @@ type Server struct {
 	frontClients map[*frontClient]struct{}
 	workerCount  int32
 
-	// wmu guards workers, the per-node registry behind /api/workers. Separate
-	// from mu so per-entry bookkeeping never contends with the broadcast path.
-	wmu     sync.Mutex
-	workers map[string]*workerInfo
+	// wmu guards workers (the per-node registry behind /api/workers) and
+	// workerConns (live connections' send channels, used to deliver
+	// pause/resume commands). Separate from mu so per-entry bookkeeping
+	// never contends with the broadcast path.
+	wmu         sync.Mutex
+	workers     map[string]*workerInfo
+	workerConns map[string]chan []byte
 
 	broadcastDropped int64 // entries dropped to slow front clients (atomic)
 
@@ -79,6 +83,7 @@ func New(log *slog.Logger, opts Options) *Server {
 		apiToken:     opts.APIToken,
 		frontClients: map[*frontClient]struct{}{},
 		workers:      map[string]*workerInfo{},
+		workerConns:  map[string]chan []byte{},
 		resolver:     newResolver(log),
 		uiDir:        opts.UIDir,
 		upgrader: websocket.Upgrader{
@@ -104,6 +109,7 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/summary", s.handleSummary)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/workers", s.handleWorkers)
+	mux.HandleFunc("/api/workers/capture", s.handleWorkerCapture)
 	mux.HandleFunc("/api/fields", s.handleFields)
 	mux.HandleFunc("/api/fields/", s.handleFieldValues)
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -151,15 +157,19 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 // plus its self-reported counters, kept after disconnect so "worker was here,
 // went away 2 min ago" is answerable during an incident.
 type workerInfo struct {
-	Node        string    `json:"node"`
-	Version     string    `json:"version,omitempty"`
-	Connected   bool      `json:"connected"`
-	ConnectedAt time.Time `json:"connectedAt"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Entries     int64     `json:"entries"`     // entries the hub received from this worker
-	Dropped     uint64    `json:"dropped"`     // worker-reported sink-buffer drops
-	CaptureLive bool      `json:"captureLive"` // AF_PACKET source active on the worker
-	CaptureTLS  bool      `json:"captureTls"`  // eBPF TLS capture active on the worker
+	Node          string    `json:"node"`
+	Version       string    `json:"version,omitempty"`
+	Connected     bool      `json:"connected"`
+	ConnectedAt   time.Time `json:"connectedAt"`
+	LastSeen      time.Time `json:"lastSeen"`
+	Entries       int64     `json:"entries"`       // entries the hub received from this worker
+	Dropped       uint64    `json:"dropped"`       // worker-reported sink-buffer drops
+	CaptureLive   bool      `json:"captureLive"`   // AF_PACKET source active on the worker
+	CaptureTLS    bool      `json:"captureTls"`    // eBPF TLS capture active on the worker
+	CapturePaused bool      `json:"capturePaused"` // hub told this worker to stop turning capture into entries
+	RingPackets   uint64    `json:"ringPackets"`   // AF_PACKET kernel ring: cumulative packets delivered
+	RingDrops     uint64    `json:"ringDrops"`     // AF_PACKET kernel ring: cumulative packets dropped before userspace saw them
+	FlowsEvicted  uint64    `json:"flowsEvicted"`  // generic L4 flows dropped by the worker's maxFlows cap
 }
 
 func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
@@ -174,9 +184,23 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&s.workerCount, 1)
 	defer atomic.AddInt32(&s.workerCount, -1)
 
+	// send carries commands (pause/resume) down to this worker; workerWriter
+	// drains it concurrently with the read loop below so a command can go
+	// out at any time without waiting on (or blocking) message reads.
+	send := make(chan []byte, 8)
+	go s.workerWriter(conn, send)
+
 	node := "unknown"
 	defer func() {
 		s.workerUpdate(node, func(wi *workerInfo) { wi.Connected = false })
+		s.wmu.Lock()
+		// Only remove if this connection's channel is still the registered
+		// one — a reconnect for the same node may have already replaced it.
+		if s.workerConns[node] == send {
+			delete(s.workerConns, node)
+		}
+		s.wmu.Unlock()
+		close(send)
 	}()
 	for {
 		_, data, err := conn.ReadMessage()
@@ -201,6 +225,9 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 					wi.ConnectedAt = now
 					wi.LastSeen = now
 				})
+				s.wmu.Lock()
+				s.workerConns[node] = send
+				s.wmu.Unlock()
 			}
 		case api.MsgEntry:
 			if env.Entry != nil {
@@ -218,11 +245,83 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 					wi.Dropped = ws.Dropped
 					wi.CaptureLive = ws.CaptureLive
 					wi.CaptureTLS = ws.CaptureTLS
+					wi.CapturePaused = ws.CapturePaused
+					wi.RingPackets = ws.RingPackets
+					wi.RingDrops = ws.RingDrops
+					wi.FlowsEvicted = ws.FlowsEvicted
 					wi.LastSeen = time.Now()
 				})
 			}
 		}
 	}
+}
+
+// workerWriter drains send to conn until the channel closes (worker
+// disconnected) or a write fails (dead connection — the read loop's next
+// ReadMessage will notice and tear things down).
+func (s *Server) workerWriter(conn *websocket.Conn, send chan []byte) {
+	for b := range send {
+		if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
+			return
+		}
+	}
+}
+
+// sendWorkerCommand delivers cmd to node's connection, or to every currently
+// connected worker when node is "". Returns how many it reached — 0 for an
+// unknown/disconnected node is a normal, silent no-op (the front end's
+// toggle reflects registry state, not a per-call delivery guarantee).
+func (s *Server) sendWorkerCommand(node string, cmd api.WorkerCommand) int {
+	b, err := json.Marshal(api.Envelope{Type: api.MsgWorkerCommand, WorkerCommand: &cmd})
+	if err != nil {
+		return 0
+	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	sent := 0
+	deliver := func(ch chan []byte) {
+		select {
+		case ch <- b:
+			sent++
+		default:
+			// Worker's inbound command buffer is full (very small, 8 slots) —
+			// drop rather than block the caller; the next state fetch will
+			// still reflect whatever the worker was last told.
+		}
+	}
+	if node == "" {
+		for _, ch := range s.workerConns {
+			deliver(ch)
+		}
+		return sent
+	}
+	if ch, ok := s.workerConns[node]; ok {
+		deliver(ch)
+	}
+	return sent
+}
+
+// handleWorkerCapture pauses or resumes capture on one worker (node) or all
+// of them (node omitted/empty). Pausing doesn't stop AF_PACKET/eBPF at the
+// source or drop the hub connection — the worker just stops turning what it
+// reads into entries — so resuming is instant.
+func (s *Server) handleWorkerCapture(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Node   string `json:"node"`
+		Paused bool   `json:"paused"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	sent := s.sendWorkerCommand(req.Node, api.WorkerCommand{Paused: req.Paused})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"sent": sent})
 }
 
 // workerUpdate applies fn to node's registry row, creating it on first sight.
@@ -718,6 +817,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 				v = 1
 			}
 			fmt.Fprintf(&b, "k8shark_worker_connected{node=%q} %d\n", wi.Node, v)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_ring_drops_total AF_PACKET kernel ring packets dropped before userspace saw them.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_ring_drops_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_ring_drops_total{node=%q} %d\n", wi.Node, wi.RingDrops)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_flows_evicted_total Generic L4 flows dropped by the worker's maxFlows cap.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_flows_evicted_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_flows_evicted_total{node=%q} %d\n", wi.Node, wi.FlowsEvicted)
 		}
 	}
 

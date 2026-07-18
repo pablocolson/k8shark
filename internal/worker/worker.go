@@ -110,6 +110,22 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	return captureLoop(ctx, log, p, src)
 }
 
+// Bounds on tcpassembly's out-of-order reassembly buffer (gopacket pages are
+// ~1900 bytes each). Left at the library default (0 = unlimited), a lossy
+// capture — dropped ring-buffer segments, a node-wide packet storm — makes
+// out-of-order pages accumulate for up to the flush window with no ceiling,
+// which can OOMKill the worker DaemonSet well before FlushOlderThan ever
+// runs. maxBufferedPagesTotal (~95 MB) leaves headroom under the chart's
+// default 512Mi worker memory limit for flow maps and everything else the
+// process holds; maxBufferedPagesPerConnection (~7.5 MB) keeps one noisy or
+// lossy connection from consuming that whole budget by itself. Past either
+// bound, tcpassembly degrades to discarding the oldest buffered page instead
+// of growing further — the affected stream is truncated, not the process.
+const (
+	maxBufferedPagesTotal         = 50000
+	maxBufferedPagesPerConnection = 4000
+)
+
 // captureLoop drives packet consumption plus the periodic flush/gc tickers.
 // src may be nil (AF_PACKET unavailable): the gc/flush loop still runs so an
 // eBPF-TLS-only worker prunes its pipeline state, and it blocks until ctx is
@@ -121,6 +137,8 @@ func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture
 	)
 	if src != nil {
 		assembler = tcpassembly.NewAssembler(tcpassembly.NewStreamPool(&tcpStreamFactory{p: p}))
+		assembler.MaxBufferedPagesTotal = maxBufferedPagesTotal
+		assembler.MaxBufferedPagesPerConnection = maxBufferedPagesPerConnection
 		packets = src.Packets()
 	}
 
@@ -136,6 +154,16 @@ func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture
 		case <-flush.C:
 			if assembler != nil {
 				assembler.FlushOlderThan(time.Now().Add(-2 * time.Minute))
+			}
+			// Piggyback the ring-stats probe on the same 30s ticker rather
+			// than adding a dedicated one — this is a coarse "is the kernel
+			// dropping packets" gauge, not something that needs tighter
+			// freshness than the sink's own 10s self-report cadence.
+			if src != nil {
+				if rs, ok := src.Stats(); ok {
+					p.sink.ringPackets.Store(rs.Packets)
+					p.sink.ringDrops.Store(rs.Drops)
+				}
 			}
 		case <-gc.C:
 			p.gc()
@@ -185,6 +213,9 @@ func buildAMQPPorts(extra []int) map[int]bool {
 // per-packet. Anything L7-dissected is flagged so it isn't double-counted as a
 // generic flow.
 func (p *pipeline) route(assembler *tcpassembly.Assembler, pkt gopacket.Packet) {
+	if p.sink.paused() {
+		return // hub told this worker to stop turning capture into entries
+	}
 	net := pkt.NetworkLayer()
 	if net == nil {
 		return

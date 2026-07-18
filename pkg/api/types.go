@@ -242,18 +242,30 @@ const (
 	MsgFilterError MessageType = "filterError"
 	// worker -> hub: periodic worker self-report (drop counters, capture state)
 	MsgWorkerStats MessageType = "workerStats"
+	// hub -> worker: pause/resume capture (see WorkerCommand)
+	MsgWorkerCommand MessageType = "workerCommand"
 )
 
 // Envelope wraps every WebSocket frame. Exactly one of the payload pointers is
 // set, matching Type.
 type Envelope struct {
-	Type        MessageType  `json:"type"`
-	Entry       *Entry       `json:"entry,omitempty"`
-	Stats       *Stats       `json:"stats,omitempty"`
-	Hello       *Hello       `json:"hello,omitempty"`
-	Filter      string       `json:"filter,omitempty"`
-	Error       string       `json:"error,omitempty"`
-	WorkerStats *WorkerStats `json:"workerStats,omitempty"`
+	Type          MessageType    `json:"type"`
+	Entry         *Entry         `json:"entry,omitempty"`
+	Stats         *Stats         `json:"stats,omitempty"`
+	Hello         *Hello         `json:"hello,omitempty"`
+	Filter        string         `json:"filter,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	WorkerStats   *WorkerStats   `json:"workerStats,omitempty"`
+	WorkerCommand *WorkerCommand `json:"workerCommand,omitempty"`
+}
+
+// WorkerCommand is a hub -> worker control message. Currently just the
+// pause/resume toggle for /api/workers/capture; the worker keeps its
+// AF_PACKET/eBPF sources open either way (this isn't a start/stop of the
+// process) and just stops turning what it reads into entries while paused,
+// so resuming is instant rather than needing a reconnect.
+type WorkerCommand struct {
+	Paused bool `json:"paused"`
 }
 
 // Hello is sent by a worker when it connects to the hub.
@@ -265,11 +277,15 @@ type Hello struct {
 // WorkerStats is a worker's periodic self-report, so the hub (and its API
 // consumers) can tell a quiet node from a broken or dropping one.
 type WorkerStats struct {
-	Node        string `json:"node"`
-	EntriesSent uint64 `json:"entriesSent"` // entries handed to the hub connection
-	Dropped     uint64 `json:"dropped"`     // entries dropped on a full sink buffer
-	CaptureLive bool   `json:"captureLive"` // AF_PACKET source currently active
-	CaptureTLS  bool   `json:"captureTls"`  // eBPF TLS capture currently active
+	Node          string `json:"node"`
+	EntriesSent   uint64 `json:"entriesSent"`   // entries handed to the hub connection
+	Dropped       uint64 `json:"dropped"`       // entries dropped on a full sink buffer
+	CaptureLive   bool   `json:"captureLive"`   // AF_PACKET source currently active
+	CaptureTLS    bool   `json:"captureTls"`    // eBPF TLS capture currently active
+	CapturePaused bool   `json:"capturePaused"` // hub told this worker to stop turning capture into entries
+	RingPackets   uint64 `json:"ringPackets"`   // AF_PACKET kernel ring: cumulative packets delivered
+	RingDrops     uint64 `json:"ringDrops"`     // AF_PACKET kernel ring: cumulative packets dropped before userspace saw them
+	FlowsEvicted  uint64 `json:"flowsEvicted"`  // generic L4 flows dropped by the worker's maxFlows cap
 }
 
 // WindowStats is a trailing-window slice of traffic, for "current" rates as

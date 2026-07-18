@@ -150,3 +150,79 @@ func TestHandleWorkers(t *testing.T) {
 		t.Error(`"unknown" node leaked into the registry`)
 	}
 }
+
+// TestSendWorkerCommand exercises the hub -> worker delivery path directly
+// (no real WebSocket needed: workerConns just holds a channel per connected
+// node, which handleWorker registers on MsgHello — see server.go).
+func TestSendWorkerCommand(t *testing.T) {
+	s := New(slog.Default(), Options{})
+	nodeA := make(chan []byte, 8)
+	nodeB := make(chan []byte, 8)
+	s.workerConns["node-a"] = nodeA
+	s.workerConns["node-b"] = nodeB
+
+	// Targeting one node reaches only that node.
+	if sent := s.sendWorkerCommand("node-a", api.WorkerCommand{Paused: true}); sent != 1 {
+		t.Fatalf("sendWorkerCommand(node-a) sent = %d, want 1", sent)
+	}
+	select {
+	case b := <-nodeA:
+		var env api.Envelope
+		if err := json.Unmarshal(b, &env); err != nil {
+			t.Fatalf("decoding delivered command: %v", err)
+		}
+		if env.Type != api.MsgWorkerCommand || env.WorkerCommand == nil || !env.WorkerCommand.Paused {
+			t.Errorf("delivered envelope = %+v, want workerCommand{paused:true}", env)
+		}
+	default:
+		t.Fatal("node-a received nothing")
+	}
+	select {
+	case <-nodeB:
+		t.Error("node-b should not have received node-a's command")
+	default:
+	}
+
+	// An empty node targets every connected worker.
+	if sent := s.sendWorkerCommand("", api.WorkerCommand{Paused: false}); sent != 2 {
+		t.Fatalf("sendWorkerCommand(\"\") sent = %d, want 2", sent)
+	}
+
+	// An unknown node is a silent no-op, not an error.
+	if sent := s.sendWorkerCommand("node-c", api.WorkerCommand{Paused: true}); sent != 0 {
+		t.Fatalf("sendWorkerCommand(node-c) sent = %d, want 0 (not connected)", sent)
+	}
+}
+
+func TestHandleWorkerCapture(t *testing.T) {
+	s := New(slog.Default(), Options{})
+	ch := make(chan []byte, 8)
+	s.workerConns["node-a"] = ch
+
+	body := strings.NewReader(`{"node":"node-a","paused":true}`)
+	rec := httptest.NewRecorder()
+	s.handleWorkerCapture(rec, httptest.NewRequest(http.MethodPost, "/api/workers/capture", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct{ Sent int }
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Sent != 1 {
+		t.Errorf("sent = %d, want 1", resp.Sent)
+	}
+	select {
+	case <-ch:
+	default:
+		t.Error("node-a's channel received nothing")
+	}
+
+	// GET is rejected — this is a control action, not a read.
+	rec = httptest.NewRecorder()
+	s.handleWorkerCapture(rec, httptest.NewRequest(http.MethodGet, "/api/workers/capture", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d, want 405", rec.Code)
+	}
+}

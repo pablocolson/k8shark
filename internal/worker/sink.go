@@ -42,6 +42,26 @@ type sink struct {
 	captureLive atomic.Bool // AF_PACKET source active
 	captureTLS  atomic.Bool // eBPF TLS capture active
 
+	// capturePaused is set remotely by the hub (MsgWorkerCommand, see
+	// reader()) via POST /api/workers/capture. AF_PACKET/eBPF sources stay
+	// open either way — route()/consumeTLS check this and drop what they
+	// read before doing any reassembly/dissection work, so toggling it back
+	// off is instant rather than needing a reconnect.
+	capturePaused atomic.Bool
+
+	// ringPackets/ringDrops mirror the AF_PACKET kernel ring's own cumulative
+	// counters (captureLoop probes capture.PacketSource.Stats periodically).
+	// Distinct from dropped above, which only counts entries lost after the
+	// pipeline already turned them into dissected output — a rising
+	// ringDrops means traffic was lost before the worker ever saw it.
+	ringPackets atomic.Uint64
+	ringDrops   atomic.Uint64
+
+	// flowsEvicted counts generic L4 flows dropped by dissect_l4.go's
+	// maxFlows cap (a burst of new connections between flushFlows cycles),
+	// set directly by the pipeline via p.sink.flowsEvicted.
+	flowsEvicted atomic.Uint64
+
 	mu   sync.Mutex
 	conn *websocket.Conn
 }
@@ -54,6 +74,13 @@ func newSink(hubURL, hubToken, node string, log *slog.Logger) *sink {
 		log:      log,
 		ch:       make(chan *api.Entry, 1024),
 	}
+}
+
+// paused reports whether the hub has told this worker to stop turning
+// capture into entries. Checked by route() / consumeTLS on every
+// packet/record, so it stays a plain atomic load.
+func (s *sink) paused() bool {
+	return s.capturePaused.Load()
 }
 
 // emit queues an entry, dropping the incoming (newest) entry if the buffer is
@@ -126,6 +153,27 @@ func (s *sink) connect() error {
 	return conn.WriteMessage(websocket.TextMessage, hello)
 }
 
+// reader consumes control frames (currently just pause/resume) from the hub
+// on conn until it closes. Runs concurrently with pump's writes — gorilla's
+// websocket.Conn supports one concurrent reader alongside one concurrent
+// writer, which is exactly this split.
+func (s *sink) reader(conn *websocket.Conn) {
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var env api.Envelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			continue
+		}
+		if env.Type == api.MsgWorkerCommand && env.WorkerCommand != nil {
+			s.capturePaused.Store(env.WorkerCommand.Paused)
+			s.log.Info("capture pause state set by hub", "paused", env.WorkerCommand.Paused)
+		}
+	}
+}
+
 // pump writes buffered entries (plus a periodic self-report frame) to the
 // current connection until it errors or ctx is cancelled.
 func (s *sink) pump(ctx context.Context) {
@@ -136,6 +184,7 @@ func (s *sink) pump(ctx context.Context) {
 		return
 	}
 	defer conn.Close()
+	go s.reader(conn)
 
 	write := func(b []byte) error {
 		conn.SetWriteDeadline(time.Now().Add(sinkWriteTimeout))
@@ -151,11 +200,15 @@ func (s *sink) pump(ctx context.Context) {
 			return
 		case <-stats.C:
 			b, err := json.Marshal(api.Envelope{Type: api.MsgWorkerStats, WorkerStats: &api.WorkerStats{
-				Node:        s.node,
-				EntriesSent: s.sent.Load(),
-				Dropped:     s.dropped.Load(),
-				CaptureLive: s.captureLive.Load(),
-				CaptureTLS:  s.captureTLS.Load(),
+				Node:          s.node,
+				EntriesSent:   s.sent.Load(),
+				Dropped:       s.dropped.Load(),
+				CaptureLive:   s.captureLive.Load(),
+				CaptureTLS:    s.captureTLS.Load(),
+				CapturePaused: s.capturePaused.Load(),
+				RingPackets:   s.ringPackets.Load(),
+				RingDrops:     s.ringDrops.Load(),
+				FlowsEvicted:  s.flowsEvicted.Load(),
 			}})
 			if err != nil {
 				continue

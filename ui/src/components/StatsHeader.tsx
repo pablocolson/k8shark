@@ -2,6 +2,7 @@ import type { Stats, StatsPoint } from "../types";
 import { PROTO_COLORS } from "../constants";
 import { Sparkline } from "./Sparkline";
 import { useTheme } from "../useTheme";
+import { useWorkers } from "../useWorkers";
 
 const STATUS_ORDER = ["success", "warning", "error"] as const;
 
@@ -19,6 +20,9 @@ export function StatsHeader({
   activeProto?: string | null;
 }) {
   const { theme, toggleTheme } = useTheme();
+  const { workers, setCapturePaused } = useWorkers();
+  const connectedWorkers = workers.filter((w) => w.connected);
+  const capturePaused = connectedWorkers.length > 0 && connectedWorkers.every((w) => w.capturePaused);
 
   return (
     <header className="header">
@@ -78,6 +82,22 @@ export function StatsHeader({
         <span className="conn-dot" />
         {connected ? "live" : "reconnecting…"}
       </div>
+
+      <button
+        type="button"
+        className={`toggle capture-toggle${capturePaused ? " active" : ""}`}
+        onClick={() => setCapturePaused(!capturePaused)}
+        disabled={connectedWorkers.length === 0}
+        title={
+          connectedWorkers.length === 0
+            ? "no workers connected"
+            : capturePaused
+              ? `resume capture on ${connectedWorkers.length === 1 ? "the connected node" : `all ${connectedWorkers.length} connected nodes`}`
+              : `pause capture on ${connectedWorkers.length === 1 ? "the connected node" : `all ${connectedWorkers.length} connected nodes`} — the worker stays connected, it just stops turning what it reads into entries`
+        }
+      >
+        {capturePaused ? "▶ resume capture" : "⏸ pause capture"}
+      </button>
 
       <button
         type="button"

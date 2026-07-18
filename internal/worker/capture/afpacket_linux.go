@@ -132,6 +132,18 @@ func newLive(iface string, snaplen int) (PacketSource, error) {
 
 func (l *liveSource) Packets() <-chan gopacket.Packet { return l.src.Packets() }
 
+// Stats reads the kernel's own cumulative packet/drop counters for this
+// socket (TPACKET_V3's tp_packets/tp_drops via getsockopt). Unlike our
+// userspace read loop, this sees drops the kernel made before the ring was
+// ever handed to us.
+func (l *liveSource) Stats() (RingStats, bool) {
+	_, v3, err := l.tp.SocketStats()
+	if err != nil {
+		return RingStats{}, false
+	}
+	return RingStats{Packets: uint64(v3.Packets()), Drops: uint64(v3.Drops())}, true
+}
+
 func (l *liveSource) Close() error {
 	l.tp.Close()
 	return nil

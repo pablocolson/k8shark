@@ -130,3 +130,33 @@ func TestTrackTCPCapturesRawPayload(t *testing.T) {
 		t.Errorf("raw.Hex = %q, want it to contain the captured payload text", raw.Hex)
 	}
 }
+
+// TestMaxFlowsCapEvicts guards against p.flows growing without bound when a
+// burst of connections (SYN flood/scan) arrives faster than flushFlows'
+// idle-based reaping runs.
+func TestMaxFlowsCapEvicts(t *testing.T) {
+	orig := maxFlows
+	maxFlows = 3
+	defer func() { maxFlows = orig }()
+
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	base := time.Unix(1_700_000_002, 0)
+
+	// 5 distinct connections, each just a SYN (no FIN/RST, so trackTCP itself
+	// never removes one) — enough to push well past the shrunk cap.
+	for i := 0; i < 5; i++ {
+		reqNet, reqTr, _, _ := flows(42000+i, 80)
+		p.trackTCP(reqNet, reqTr, mkTCP(1, true, false, false, 1000, 0), 60, base, l4meta{})
+	}
+
+	p.flowMu.Lock()
+	n := len(p.flows)
+	p.flowMu.Unlock()
+	if n > maxFlows {
+		t.Errorf("len(p.flows) = %d, want <= maxFlows (%d)", n, maxFlows)
+	}
+	if got := s.flowsEvicted.Load(); got == 0 {
+		t.Error("flowsEvicted = 0, want > 0 after exceeding maxFlows")
+	}
+}

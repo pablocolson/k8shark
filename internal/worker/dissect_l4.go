@@ -113,6 +113,33 @@ func newFlow(proto api.Protocol, netFlow, transport gopacket.Flow, ts time.Time)
 	return &flowState{proto: proto, src: src, dst: dst, firstSeen: ts, lastSeen: ts}
 }
 
+// maxFlows bounds p.flows so a burst of new connections — a SYN flood, a
+// port scan against a still-open port (the cBPF kernel filter already blocks
+// most scan traffic outright, see afpacket_linux.go's l7Filter) — can't grow
+// the flow-accounting map without limit in between flushFlows cycles (every
+// 15s). reqBacklogCap bounds the analogous per-connection backlog the same
+// way. A var (not a const) only so tests can shrink it; production code
+// never assigns to it.
+var maxFlows = 100000
+
+// evictOverCapLocked drops one flow if p.flows is over maxFlows. It picks
+// whichever key a single map iteration step yields rather than scanning for
+// the actual oldest entry: a full scan would itself cost O(len(p.flows)) per
+// insert once at cap, which is exactly the kind of unbounded CPU work a
+// flood should not be able to trigger. flushFlows already reaps idle flows
+// properly (by lastSeen) every 15s; this cap only matters for the burst
+// between those cycles. Callers must hold flowMu.
+func (p *pipeline) evictOverCapLocked() {
+	if len(p.flows) <= maxFlows {
+		return
+	}
+	for k := range p.flows {
+		delete(p.flows, k)
+		p.sink.flowsEvicted.Add(1)
+		return
+	}
+}
+
 // markL7 flags a connection as L7-dissected so trackTCP won't emit a duplicate
 // generic flow for it.
 func (p *pipeline) markL7(key string) {
@@ -121,6 +148,7 @@ func (p *pipeline) markL7(key string) {
 		f.l7 = true
 	} else {
 		p.flows[key] = &flowState{l7: true}
+		p.evictOverCapLocked()
 	}
 	p.flowMu.Unlock()
 }
@@ -136,6 +164,7 @@ func (p *pipeline) trackTCP(netFlow, transport gopacket.Flow, tcp *layers.TCP, l
 	if f == nil {
 		f = newFlow(api.ProtocolTCP, netFlow, transport, ts)
 		p.flows[key] = f
+		p.evictOverCapLocked()
 	} else if f.firstSeen.IsZero() {
 		// Was created by markL7 before any packet; fill in orientation.
 		nf := newFlow(api.ProtocolTCP, netFlow, transport, ts)
@@ -278,6 +307,7 @@ func (p *pipeline) trackUDP(netFlow, transport gopacket.Flow, length int, ts tim
 	if f == nil {
 		f = newFlow(api.ProtocolUDP, netFlow, transport, ts)
 		p.flows[key] = f
+		p.evictOverCapLocked()
 	}
 	f.lastSeen = ts
 	f.packets++

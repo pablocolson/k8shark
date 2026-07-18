@@ -97,6 +97,9 @@ func (p *pipeline) consumeTLS(ctx context.Context, src ebpf.Source) {
 				closeAll()
 				return
 			}
+			if p.sink.paused() {
+				continue // hub told this worker to stop turning capture into entries
+			}
 			st := streams[rec.ConnID]
 			if st == nil {
 				st = newTLSStream(p, rec)
