@@ -45,7 +45,7 @@ jobs:
         run: go build ./...
 
       - name: go test
-        run: go test ./...
+        run: go test -race ./...
 
   ui:
     name: UI build
@@ -60,6 +60,9 @@ jobs:
           cache-dependency-path: ui/package-lock.json
 
       - run: npm ci
+        working-directory: ui
+
+      - run: npm test
         working-directory: ui
 
       - run: npm run build
@@ -112,6 +115,7 @@ jobs:
           tags: ${{ steps.meta-bin.outputs.tags }}
           labels: ${{ steps.meta-bin.outputs.labels }}
           platforms: linux/amd64
+          build-args: VERSION=${{ steps.meta-bin.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

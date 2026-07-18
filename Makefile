@@ -10,12 +10,12 @@ PLATFORMS   ?= linux/amd64,linux/arm64
 # macOS 26 (darwin) needs the external linker (LC_UUID) + an ad-hoc signature to
 # run locally. On Linux this is a no-op path.
 GOOS := $(shell go env GOOS)
-LDFLAGS := -X github.com/coe/k8shark/internal/config.Version=$(VERSION)
+LDFLAGS := -X github.com/pablocolson/k8shark/internal/config.Version=$(VERSION)
 ifeq ($(GOOS),darwin)
 LDFLAGS := -linkmode=external $(LDFLAGS)
 endif
 
-.PHONY: all build ui sign run-hub run-worker dev clean docker-build docker-push docker-buildx helm-lint tidy test gen
+.PHONY: all build ui sign run-hub run-worker dev clean docker-build docker-push docker-buildx helm-lint tidy test test-ui gen
 
 all: ui build
 
@@ -56,8 +56,12 @@ gen:
 		"apt-get update -qq && apt-get install -y -qq --no-install-recommends clang llvm libbpf-dev linux-libc-dev && GOFLAGS=-mod=mod go generate ./..."
 
 test:
-	GOFLAGS=-mod=mod GOTOOLCHAIN=local go test \
+	GOFLAGS=-mod=mod GOTOOLCHAIN=local go test -race \
 		$(if $(filter darwin,$(GOOS)),-ldflags='-linkmode=external',) ./...
+
+## run the front-end unit tests (vitest)
+test-ui:
+	cd ui && npm ci --no-audit --no-fund && npm test
 
 helm-lint:
 	helm lint helm/k8shark

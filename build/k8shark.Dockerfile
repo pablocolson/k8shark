@@ -21,7 +21,7 @@ COPY . .
 ARG VERSION=dev
 ENV CGO_ENABLED=1 GOOS=linux
 RUN go build -trimpath \
-    -ldflags="-s -w -X github.com/coe/k8shark/internal/config.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/pablocolson/k8shark/internal/config.Version=${VERSION}" \
     -o /out/k8shark ./cmd/k8shark
 
 # Runtime: slim Debian (glibc for the cgo binary). No libpcap needed — AF_PACKET
