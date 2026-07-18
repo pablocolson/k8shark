@@ -85,7 +85,17 @@ spec:
             # eBPF capture needs its caps in the effective set, which a non-root
             # UID drops (no ambient caps) — EPERM on socket(AF_PACKET) otherwise.
             runAsUser: 0
+            {{- if not .Values.worker.privileged }}
+            allowPrivilegeEscalation: false
+            {{- end }}
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              # The default seccomp profile is known to block bpf()/
+              # perf_event_open() on some runtimes; only relax it when the
+              # eBPF uprobe path actually needs those syscalls.
+              type: {{ if .Values.worker.tls.enabled }}Unconfined{{ else }}RuntimeDefault{{ end }}
             capabilities:
+              drop: [ALL]
               add:
                 - NET_RAW
                 - NET_ADMIN

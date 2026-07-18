@@ -1,0 +1,58 @@
+{{- if .Values.networkPolicy.enabled }}
+# Restricts inbound traffic to the hub and front Services. Off by default
+# (networkPolicy.enabled) since a missing peer here is a silent outage, not a
+# loud one — enable once you know your ingress/scrape topology.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: k8shark-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: k8shark-hub
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: k8shark-worker
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: k8shark-front
+        {{- with .Values.networkPolicy.hubExtraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.hub.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: k8shark-front
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: k8shark-front
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Bare podSelector with no namespaceSelector matches any pod in this
+        # same namespace — add frontExtraFrom for a cross-namespace ingress
+        # controller.
+        - podSelector: {}
+        {{- with .Values.networkPolicy.frontExtraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.front.port }}
+{{- end }}

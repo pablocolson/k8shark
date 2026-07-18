@@ -24,6 +24,11 @@ pdb:
 
 hub:
   port: 8898
+  # replicas: must stay 1. The ring buffer, worker registry, filter facets and
+  # front WebSocket fan-out are all in-memory state local to one pod — there
+  # is no shared backing store, so a second replica would silently see only
+  # half the workers/clients rather than sharing state. The chart refuses to
+  # render with a higher value (see templates/hub.yaml).
   replicas: 1
   # bufferSize: how many recent entries the hub keeps in memory (0 = built-in
   # default, 10000). At 1k entries/s the default is only ~10s of history —
@@ -32,7 +37,10 @@ hub:
   # apiToken: when set, /api and the WebSocket endpoints require
   # `Authorization: Bearer <token>` (or ?token=). Workers and the front proxy
   # receive it automatically via a Secret; port-forward users pass it by hand.
-  # Empty (default) keeps the API open, as before.
+  # Empty (default) keeps the API open — anyone who can reach the hub Service
+  # can read all captured traffic. `k8shark tap` auto-generates a token unless
+  # given --no-auth or an explicit `--set hub.apiToken=...`; installing
+  # straight from this chart (helm install, not tap) still defaults to open.
   apiToken: ""
   resources:
     requests:
@@ -88,12 +96,37 @@ worker:
     debugfs: false # mount /sys/kernel/debug; usually unnecessary on modern kernels
   # AF_PACKET capture needs elevated privileges and the host network namespace.
   hostNetwork: true
-  privileged: true
+  # privileged: false relies on the capabilities listed above (NET_RAW/
+  # NET_ADMIN, plus the eBPF set when tls.enabled) instead of full privileged
+  # access — those are all AF_PACKET/eBPF actually needs. Set this to true only
+  # as a documented escape hatch for CNIs/kernels where the fine-grained
+  # capability set isn't enough (rare; try the default first).
+  privileged: false
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
       memory: 512Mi
+
+# networkPolicy: restrict which pods can reach the hub and front Services.
+# Off by default (matches the chart's existing opt-in posture — see the note
+# on hub.apiToken above: without this the hub Service is reachable, and its
+# captured traffic readable, from any pod in the cluster). The default rules
+# below only allow k8shark's own worker/front pods, plus anything else in
+# this namespace for the front Service; add the extra peers your cluster
+# needs (a cross-namespace ingress controller, a Prometheus scraping
+# /metrics) via the two lists below rather than turning this off.
+networkPolicy:
+  enabled: false
+  # Extra NetworkPolicyPeer entries (podSelector/namespaceSelector/ipBlock)
+  # allowed to reach the hub on hub.port, in addition to k8shark's own
+  # worker/front pods — e.g. a Prometheus in another namespace scraping
+  # /metrics.
+  hubExtraFrom: []
+  # Extra NetworkPolicyPeer entries allowed to reach the front Service, in
+  # addition to any pod already in this namespace — e.g. your ingress
+  # controller's namespace or pods, if it doesn't run in this namespace.
+  frontExtraFrom: []
 
 logLevel: info

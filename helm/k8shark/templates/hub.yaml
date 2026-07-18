@@ -50,6 +50,9 @@ stringData:
   token: {{ .Values.hub.apiToken | quote }}
 ---
 {{- end }}
+{{- if gt (int .Values.hub.replicas) 1 }}
+{{- fail "hub.replicas > 1 is not supported: the ring buffer, worker registry and WebSocket fan-out are all in-memory state local to one pod, so a second replica silently sees only part of the traffic/workers/clients rather than sharing state. Keep hub.replicas at 1." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
