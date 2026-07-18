@@ -41,9 +41,12 @@ export function entriesToCSV(entries: Entry[]): string {
 
 // downloadFile triggers a browser save-as for locally-generated content —
 // nothing is fetched from anywhere, it's purely a Blob synthesized from data
-// already loaded in the page.
-export function downloadFile(content: string, filename: string, mime: string): void {
-  const blob = new Blob([content], { type: mime });
+// already loaded in the page. Accepts text (CSV/JSON) or binary (pcap.ts's
+// Uint8Array) content alike; the cast below is a real BlobPart at runtime
+// either way — TS's lib types are just stricter about ArrayBuffer vs.
+// ArrayBufferLike than this ever needs to be.
+export function downloadFile(content: BlobPart | Uint8Array, filename: string, mime: string): void {
+  const blob = new Blob([content as BlobPart], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

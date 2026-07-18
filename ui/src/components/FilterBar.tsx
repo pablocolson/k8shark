@@ -4,6 +4,7 @@ import { contextAt } from "../filterParse";
 import { useFields } from "../useFields";
 import { MAX_ENTRIES } from "../useHub";
 import { downloadFile, entriesToCSV, entriesToJSON } from "../export";
+import { entriesToPcap } from "../pcap";
 import type { Entry } from "../types";
 import { FilterSuggest, pickInsertion, useSuggestItems } from "./FilterSuggest";
 
@@ -226,8 +227,9 @@ export function FilterBar({
 }
 
 // ExportMenu downloads the entries currently loaded client-side (i.e.
-// whatever the live/filtered buffer holds right now) as JSON or CSV. Purely
-// local — a Blob built from data already in the page, no server round trip.
+// whatever the live/filtered buffer holds right now) as JSON, CSV, or a
+// synthesized PCAP. Purely local — a Blob built from data already in the
+// page, no server round trip.
 function ExportMenu({ entries }: { entries: Entry[] }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -241,12 +243,14 @@ function ExportMenu({ entries }: { entries: Entry[] }) {
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
-  const doExport = (format: "json" | "csv") => {
+  const doExport = (format: "json" | "csv" | "pcap") => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     if (format === "json") {
       downloadFile(entriesToJSON(entries), `k8shark-entries-${stamp}.json`, "application/json");
-    } else {
+    } else if (format === "csv") {
       downloadFile(entriesToCSV(entries), `k8shark-entries-${stamp}.csv`, "text/csv");
+    } else {
+      downloadFile(entriesToPcap(entries), `k8shark-entries-${stamp}.pcap`, "application/vnd.tcpdump.pcap");
     }
     setOpen(false);
   };
@@ -271,6 +275,14 @@ function ExportMenu({ entries }: { entries: Entry[] }) {
           </button>
           <button type="button" className="col-picker-item" onClick={() => doExport("csv")}>
             as CSV
+          </button>
+          <button
+            type="button"
+            className="col-picker-item"
+            onClick={() => doExport("pcap")}
+            title="Synthesized from already-captured payload bytes and L4 metadata — not a live packet capture"
+          >
+            as PCAP
           </button>
         </div>
       )}
