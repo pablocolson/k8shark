@@ -795,3 +795,56 @@ func TestHTTPTTFB(t *testing.T) {
 		t.Errorf("TTFBMs (%d) should not exceed total ElapsedMs (%d)", got[0].Response.HTTP.TTFBMs, got[0].ElapsedMs)
 	}
 }
+
+// TestHTTPHeadResponseNotDesynced guards against a HEAD response's declared
+// Content-Length being read as an actual body: per RFC 7230 a HEAD response
+// never has one, but net/http only knows that when told the request method.
+func TestHTTPHeadResponseNotDesynced(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40300, 80)
+
+	p.consumeHTTP(rNet, rTr, strings.NewReader(
+		"HEAD /x HTTP/1.1\r\nHost: h\r\n\r\n"+
+			"GET /y HTTP/1.1\r\nHost: h\r\n\r\n"))
+	// The HEAD response claims Content-Length: 5 but carries no body; naively
+	// honoring that would eat the next response's bytes as "body".
+	p.consumeHTTP(sNet, sTr, strings.NewReader(
+		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"+
+			"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok"))
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 (a desynced HEAD response swallowed the next one)", len(got))
+	}
+	if got[0].Request.Method != "HEAD" || got[0].Response.StatusCode != 200 {
+		t.Errorf("entry 0 = %s -> %d, want HEAD -> 200", got[0].Request.Method, got[0].Response.StatusCode)
+	}
+	if got[1].Request.Method != "GET" || got[1].Response.StatusCode != 201 {
+		t.Errorf("entry 1 = %s -> %d, want GET -> 201", got[1].Request.Method, got[1].Response.StatusCode)
+	}
+}
+
+// TestHTTPInterimResponseNotPaired guards against a 1xx informational
+// response (100 Continue, 103 Early Hints, ...) being paired as if it were
+// the final response, which would shift every later response on the
+// connection onto the wrong request.
+func TestHTTPInterimResponseNotPaired(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40301, 80)
+
+	p.consumeHTTP(rNet, rTr, strings.NewReader(
+		"POST /upload HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\nok"))
+	p.consumeHTTP(sNet, sTr, strings.NewReader(
+		"HTTP/1.1 100 Continue\r\n\r\n"+
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1 (100 Continue must not consume the pairing)", len(got))
+	}
+	if got[0].Response.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200 (the real response, not the 100 Continue)", got[0].Response.StatusCode)
+	}
+}

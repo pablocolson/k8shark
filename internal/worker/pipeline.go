@@ -167,6 +167,28 @@ const (
 	completeResponsePairDelay   = 2 * time.Millisecond
 )
 
+// peekPendingMethod returns the HTTP method of the oldest pending request on
+// key without consuming it (completeResponse does the actual pop once the
+// full response is parsed). Returns "" if there is no pending request yet
+// (e.g. capture started mid-response), in which case http.ReadResponse falls
+// back to its nil-request/GET behavior, matching prior behavior.
+func (p *pipeline) peekPendingMethod(key string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cs := p.conns[key]; cs != nil && len(cs.reqs) > 0 {
+		return cs.reqs[0].req.Method
+	}
+	return ""
+}
+
+// isInterimStatus reports whether code is a 1xx informational response (100
+// Continue, 103 Early Hints, ...). 101 Switching Protocols is excluded: it is
+// the final response to its Upgrade request (and ends HTTP framing on the
+// connection), not an interim one to be skipped.
+func isInterimStatus(code int) bool {
+	return code >= 100 && code <= 199 && code != http.StatusSwitchingProtocols
+}
+
 // completeResponse pairs a response with the oldest pending request on the same
 // connection and emits the finished entry.
 //
@@ -310,9 +332,25 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 				return
 			}
 			firstByte := time.Now()
-			resp, err := http.ReadResponse(br, nil)
+			// The oldest pending request's method decides whether a body is
+			// expected: net/http only skips a HEAD response's (possibly
+			// non-zero) Content-Length when told the request method — a nil
+			// req defaults to "a body may follow", which desyncs the rest of
+			// the connection onto the wrong request/response pairs.
+			method := p.peekPendingMethod(key)
+			resp, err := http.ReadResponse(br, &http.Request{Method: method})
 			if err != nil {
 				return
+			}
+			if isInterimStatus(resp.StatusCode) {
+				// 1xx informational responses (100 Continue, 103 Early
+				// Hints, ...) precede the real response to the same
+				// request; pairing them here would consume the pending
+				// request early and shift every later response onto the
+				// wrong request for the rest of the connection.
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				continue
 			}
 			body, truncated, full := p.drainBody(resp.Body)
 			ct := resp.Header.Get("Content-Type")
