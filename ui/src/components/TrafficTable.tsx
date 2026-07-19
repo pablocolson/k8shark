@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { isTypingTarget } from "../dom";
 import type { Entry } from "../types";
 import { PROTO_COLORS } from "../constants";
 
@@ -185,6 +186,33 @@ export const TrafficTable = memo(function TrafficTable({
   const paddingBottom =
     virtualRows.length > 0 ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end : 0;
   const colSpan = columns.length + 1;
+
+  // ArrowUp/ArrowDown triage a stream of entries one row at a time (Wireshark/
+  // DevTools-style) without needing to click into the table first — mirrors
+  // App.tsx's other global shortcuts ("/", space, Escape), but has to live
+  // here since displayEntries (the active sort order) and the virtualizer
+  // are local to this component. No selection yet -> jumps to the first row;
+  // otherwise moves by one, clamped at the ends (no wraparound).
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp") return;
+      if (isTypingTarget(ev.target)) return;
+      if (displayEntries.length === 0) return;
+      const curIdx = selectedId ? displayEntries.findIndex((e) => e.id === selectedId) : -1;
+      const next =
+        curIdx === -1
+          ? 0
+          : ev.key === "ArrowDown"
+            ? Math.min(curIdx + 1, displayEntries.length - 1)
+            : Math.max(curIdx - 1, 0);
+      if (next === curIdx) return;
+      ev.preventDefault();
+      onSelect(displayEntries[next]);
+      rowVirtualizer.scrollToIndex(next);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [displayEntries, selectedId, onSelect, rowVirtualizer]);
 
   return (
     <div className="table-wrap-outer">

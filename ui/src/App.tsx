@@ -6,6 +6,7 @@ import { TrafficTable } from "./components/TrafficTable";
 import { EntryDetail } from "./components/EntryDetail";
 import { ServiceMap } from "./components/ServiceMap";
 import { CompareView } from "./components/CompareView";
+import { isTypingTarget } from "./dom";
 import type { Entry } from "./types";
 
 type View = "list" | "map";
@@ -35,11 +36,6 @@ function toggleProtoFilter(filter: string, proto: string): string {
   const before = filter.slice(0, m.index).replace(/\s*\b(and|or)\s*$/i, "").trimEnd();
   const after = filter.slice(m.index + m[0].length).replace(/^\s*\b(and|or)\s*/i, "").trimStart();
   return before && after ? `${before} and ${after}` : before || after;
-}
-
-function isTypingTarget(t: EventTarget | null): boolean {
-  const el = t as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
 }
 
 export function App() {

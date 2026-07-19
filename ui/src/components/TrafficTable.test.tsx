@@ -108,4 +108,97 @@ describe("TrafficTable", () => {
     render(<TrafficTable {...baseProps} entries={entries} pinnedIds={new Set(["a"])} />);
     expect(screen.getByRole("button", { name: /pinned 1\/2/i })).toBeDisabled();
   });
+
+  describe("ArrowUp/ArrowDown row navigation", () => {
+    const entries = [
+      entry({ id: "a", request: { summary: "GET /a" } }),
+      entry({ id: "b", request: { summary: "GET /b" } }),
+      entry({ id: "c", request: { summary: "GET /c" } }),
+    ];
+
+    it("selects the first entry on ArrowDown when nothing is selected", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={entries} selectedId={null} onSelect={onSelect} />);
+      await user.keyboard("{ArrowDown}");
+      expect(onSelect).toHaveBeenCalledWith(entries[0]);
+    });
+
+    it("moves to the next entry on ArrowDown", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={entries} selectedId="b" onSelect={onSelect} />);
+      await user.keyboard("{ArrowDown}");
+      expect(onSelect).toHaveBeenLastCalledWith(entries[2]);
+    });
+
+    it("moves to the previous entry on ArrowUp", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={entries} selectedId="b" onSelect={onSelect} />);
+      await user.keyboard("{ArrowUp}");
+      expect(onSelect).toHaveBeenLastCalledWith(entries[0]);
+    });
+
+    it("does not call onSelect past the last entry", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={entries} selectedId="c" onSelect={onSelect} />);
+      await user.keyboard("{ArrowDown}");
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it("does not call onSelect before the first entry", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={entries} selectedId="a" onSelect={onSelect} />);
+      await user.keyboard("{ArrowUp}");
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    const bySpeed = [
+      entry({ id: "slow", elapsedMs: 300, request: { summary: "slow" } }),
+      entry({ id: "fast", elapsedMs: 10, request: { summary: "fast" } }),
+      entry({ id: "mid", elapsedMs: 100, request: { summary: "mid" } }),
+    ];
+
+    it("with nothing selected, ArrowDown jumps to the first entry in sorted order", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={bySpeed} selectedId={null} onSelect={onSelect} />);
+      await user.click(screen.getByText("latency")); // sorts ascending: fast, mid, slow
+      await user.keyboard("{ArrowDown}");
+      expect(onSelect).toHaveBeenLastCalledWith(bySpeed[1]); // "fast" is fastest/first
+    });
+
+    it("moves according to the active sort order, not arrival order", async () => {
+      // bySpeed's arrival order is [slow, fast, mid]; sorted ascending by
+      // latency it's [fast, mid, slow] — "slow" is first on arrival but last
+      // once sorted, so its neighbors differ between the two orderings.
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(<TrafficTable {...baseProps} entries={bySpeed} selectedId="slow" onSelect={onSelect} />);
+      await user.click(screen.getByText("latency")); // sorts ascending: fast, mid, slow
+
+      await user.keyboard("{ArrowDown}"); // "slow" is last in sorted order -> clamped, no-op
+      expect(onSelect).not.toHaveBeenCalled();
+
+      await user.keyboard("{ArrowUp}"); // previous-in-sorted-order is "mid", not arrival's "fast"
+      expect(onSelect).toHaveBeenLastCalledWith(bySpeed[2]);
+    });
+
+    it("ignores arrow keys while typing in an input", async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(
+        <>
+          <input aria-label="some other input" />
+          <TrafficTable {...baseProps} entries={entries} selectedId={null} onSelect={onSelect} />
+        </>
+      );
+      await user.click(screen.getByLabelText("some other input"));
+      await user.keyboard("{ArrowDown}");
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+  });
 });
