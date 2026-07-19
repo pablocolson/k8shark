@@ -37,6 +37,7 @@ func workerCmd() *cobra.Command {
 	cmd.Flags().IntSliceVar(&opts.RedisPorts, "redis-ports", nil, "extra RESP ports labelled redis")
 	cmd.Flags().IntSliceVar(&opts.ValkeyPorts, "valkey-ports", nil, "RESP ports labelled valkey")
 	cmd.Flags().IntSliceVar(&opts.AMQPPorts, "amqp-ports", nil, "extra AMQP 0-9-1 ports (in addition to 5672)")
+	cmd.Flags().IntSliceVar(&opts.HTTPPorts, "http-ports", nil, "extra TCP ports to admit through the kernel capture filter for HTTP traffic (in addition to 80/8080); userspace already dissects HTTP on any unclaimed port, this only unblocks the kernel filter")
 	cmd.Flags().BoolVar(&opts.CaptureBodies, "capture-bodies", true, "capture and store request/response bodies")
 	cmd.Flags().BoolVar(&opts.RedactHeaders, "redact-headers", true, "scrub credential-bearing HTTP header values (authorization, cookie, ...), sensitive query params (token, api_key, ...) and RESP auth command args (AUTH, HELLO, CONFIG SET requirepass); raw hex capture is separate — use --raw-bytes=-1 to disable that too")
 	cmd.Flags().BoolVar(&opts.RedactPGParams, "redact-pg-params", false, "replace all Postgres Bind parameter values with [REDACTED] (all-or-nothing: bind params carry no name to redact selectively)")

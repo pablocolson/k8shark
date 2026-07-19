@@ -73,6 +73,13 @@ worker:
   # amqpPorts: extra ports carrying AMQP 0-9-1 (RabbitMQ), in addition to the
   # 5672 default. e.g. [5673] for a second broker port.
   amqpPorts: []
+  # httpPorts: extra TCP ports carrying HTTP, in addition to the 80/8080
+  # defaults — e.g. [3000, 8000, 9090] for common non-standard app ports.
+  # Userspace already dissects HTTP on any port not claimed by redis/postgres/
+  # amqp; this only admits the port through the kernel-level capture filter
+  # (see internal/worker/capture/bpf.go), without which it's silently dropped
+  # before the worker ever sees it.
+  httpPorts: []
   # capture: per-direction extraction depth bounds. Defaults preserve the built-in
   # behaviour (bodies captured, 4096 B body cap, 2048 B raw hex cap).
   capture:

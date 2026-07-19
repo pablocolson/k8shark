@@ -7,6 +7,7 @@ package worker
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +33,14 @@ type Options struct {
 	RedisPorts  []int // extra RESP ports labelled "redis" (in addition to the 6379 default)
 	ValkeyPorts []int // RESP ports labelled "valkey"
 	AMQPPorts   []int // extra AMQP 0-9-1 ports (in addition to the 5672 default)
+
+	// HTTPPorts lists extra TCP ports to admit through the kernel-level
+	// capture filter for HTTP traffic (in addition to the 80/8080 defaults).
+	// Userspace dispatch already sniffs HTTP on any port that isn't claimed
+	// by redis/postgres/amqp (see consumeStream's "else" branch) — this flag
+	// only exists because the kernel filter can't do that same "else"
+	// dispatch and must be told explicit ports up front.
+	HTTPPorts []int
 
 	// Capture-depth bounds (all per-direction). Defaults preserve prior behavior.
 	CaptureBodies bool // capture & render request/response bodies (default true)
@@ -93,7 +102,7 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	// capture surfaces loudly instead of masquerading as realistic data (which
 	// once hid a non-root worker silently emitting a fake "shop" namespace).
 	var src capture.PacketSource
-	if live, err := capture.NewLive(opts.Iface, 65536); err != nil {
+	if live, err := capture.NewLive(opts.Iface, 65536, capturePorts(opts)); err != nil {
 		log.Error("AF_PACKET capture unavailable", "err", err,
 			"hint", "worker likely not root or missing NET_RAW; pass --demo for synthetic traffic")
 	} else {
@@ -214,6 +223,43 @@ func buildAMQPPorts(extra []int) map[int]bool {
 	for _, port := range extra {
 		ports[port] = true
 	}
+	return ports
+}
+
+// defaultHTTPPorts are admitted through the kernel filter even when the
+// operator hasn't set --http-ports, matching the ports the old hardcoded
+// filter always let through.
+var defaultHTTPPorts = []int{80, 8080}
+
+// capturePorts builds the kernel-level BPF filter's TCP/UDP port lists (see
+// capture.Ports) from every port source the worker knows about: the fixed
+// protocol defaults plus every operator override. A port missing from this
+// list never reaches userspace at all — the kernel drops it before route()
+// or any dissector sees it — so this must stay a superset of every port
+// buildRespPorts/buildAMQPPorts/consumeStream's HTTP fallback can dispatch.
+func capturePorts(opts Options) capture.Ports {
+	tcp := map[int]bool{redisPort: true, pgPort: true, amqpPort: true}
+	for _, p := range defaultHTTPPorts {
+		tcp[p] = true
+	}
+	for _, p := range opts.RedisPorts {
+		tcp[p] = true
+	}
+	for _, p := range opts.ValkeyPorts {
+		tcp[p] = true
+	}
+	for _, p := range opts.AMQPPorts {
+		tcp[p] = true
+	}
+	for _, p := range opts.HTTPPorts {
+		tcp[p] = true
+	}
+
+	ports := capture.Ports{UDP: []int{53}} // DNS
+	for p := range tcp {
+		ports.TCP = append(ports.TCP, p)
+	}
+	sort.Ints(ports.TCP) // deterministic program, easier to reason about and test
 	return ports
 }
 

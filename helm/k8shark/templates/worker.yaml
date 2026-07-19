@@ -48,6 +48,9 @@ spec:
             {{- if .Values.worker.amqpPorts }}
             - --amqp-ports={{ join "," .Values.worker.amqpPorts }}
             {{- end }}
+            {{- if .Values.worker.httpPorts }}
+            - --http-ports={{ join "," .Values.worker.httpPorts }}
+            {{- end }}
             {{- if not .Values.worker.capture.captureBodies }}
             - --capture-bodies=false
             {{- end }}

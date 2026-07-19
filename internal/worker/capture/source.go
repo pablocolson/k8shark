@@ -24,8 +24,18 @@ type PacketSource interface {
 	Close() error
 }
 
+// Ports configures which TCP/UDP ports the kernel-level BPF filter accepts,
+// in addition to ICMP/ICMPv6 (always accepted regardless of these lists —
+// see buildL7Filter). This is what makes operator-configured ports
+// (--redis-ports, --valkey-ports, --amqp-ports, --http-ports, ...) actually
+// reach the kernel filter, not just userspace protocol dispatch.
+type Ports struct {
+	TCP []int
+	UDP []int
+}
+
 // NewLive opens a live capture on the given interface ("" = auto/any). Only
 // implemented on Linux; elsewhere it returns ErrUnsupported.
-func NewLive(iface string, snaplen int) (PacketSource, error) {
-	return newLive(iface, snaplen)
+func NewLive(iface string, snaplen int, ports Ports) (PacketSource, error) {
+	return newLive(iface, snaplen, ports)
 }
