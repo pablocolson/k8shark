@@ -355,6 +355,31 @@ func (s *Server) registerTools() {
 			handler: s.handleDiffTraffic,
 		},
 		{
+			name: "find_error_clusters",
+			description: "Group error/warning entries over a time window into clusters sharing a signature (protocol, " +
+				"destination workload, status/status code, and a normalized response summary — numeric IDs collapsed so " +
+				"\"user 42 not found\" and \"user 99 not found\" cluster together), sorted by cluster size descending. " +
+				"Each cluster reports its count, first/last-seen time and a few example entry IDs (pass one to get_entry " +
+				"for the full record). The direct answer to \"what families of errors are happening right now?\" and the " +
+				"natural first step of a debug session — prefer this over listing error entries one by one.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"filter": map[string]any{
+						"type":        "string",
+						"description": "Optional extra IFL filter narrowing which error/warning entries to cluster (e.g. `dst.namespace == \"shop\"`). " + filterDesc,
+					},
+					"since": sinceProp,
+					"until": untilProp,
+					"limit": map[string]any{
+						"type":        "number",
+						"description": "Maximum clusters to return (default 20, biggest first).",
+					},
+				},
+			},
+			handler: s.handleFindErrorClusters,
+		},
+		{
 			name: "get_timeline",
 			description: "Bucket matching traffic into a fixed-step time series (entries, errors, warnings per bucket, " +
 				"zero-filled) — use it to spot when a problem started or whether it is ongoing.",

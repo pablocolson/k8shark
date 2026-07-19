@@ -19,7 +19,7 @@ TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
 **Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
 implémentés (commits `ec1a47f`, `5a985d2`).
 
-**Phase 2 — en cours (6/9).**
+**Phase 2 — en cours (7/9).**
 
 - CAP-1 : programme cBPF généré au runtime (`internal/worker/capture/bpf.go`,
   symbolique via `golang.org/x/net/bpf`, vérifié par `bpf.VM` sur des trames
@@ -64,8 +64,17 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   d'opérateurs + filtre `in` appliqué en direct) en plus des tests unitaires
   des deux côtés.
 
+- MCP-3 : outil `find_error_clusters` (`internal/mcp/clusters.go`), entièrement
+  côté MCP — récupère les entries error/warning sur la fenêtre demandée via
+  `/api/entries` (filtre utilisateur optionnel combiné en `and`), les
+  regroupe par signature (protocol, dst.workload, status/statusCode, résumé
+  de réponse normalisé — les suites de chiffres remplacées par `#`), trié par
+  taille de cluster décroissante, avec 2-3 IDs d'exemple par cluster.
+  Vérifié en bout en bout via stdio JSON-RPC contre un hub réel.
+
 Prochain item logique par valeur/effort : **DIS-5** (sniff Redis/Postgres/AMQP
-sur ports non standard, S) ou **MCP-3** (outil find_error_clusters, M).
+sur ports non standard, S) ou **UI-1** (ancrage du scroll pendant le
+streaming, M).
 
 ## Phases proposées
 
