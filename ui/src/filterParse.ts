@@ -124,7 +124,8 @@ function tokenize(s: string): Tok[] {
     if (lower === "and") toks.push({ kind: "and", val: word, start: i, end: j });
     else if (lower === "or") toks.push({ kind: "or", val: word, start: i, end: j });
     else if (lower === "not") toks.push({ kind: "not", val: word, start: i, end: j });
-    else if (lower === "contains") toks.push({ kind: "op", val: word, start: i, end: j });
+    else if (lower === "contains" || lower === "matches" || lower === "startswith" || lower === "in")
+      toks.push({ kind: "op", val: word, start: i, end: j });
     else if (word.trim() !== "" && !Number.isNaN(Number(word))) toks.push({ kind: "number", val: word, start: i, end: j });
     else toks.push({ kind: "ident", val: word, start: i, end: j });
     i = j;

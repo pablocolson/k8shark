@@ -36,12 +36,15 @@ type FieldSpec struct {
 	EnumValues  []string // static domain always offered (e.g. protocol, status)
 }
 
-// Operator sets by field type.
+// Operator sets by field type. "in" (list membership) applies broadly;
+// "matches" (regex) and "startswith" are string-oriented, so they're offered
+// for string/freetext fields but not enum/number ones (nothing stops typing
+// them manually elsewhere — this only shapes the autocomplete menu).
 var (
-	opsEnum   = []string{"==", "!="}
-	opsString = []string{"==", "!=", "contains"}
-	opsNumber = []string{"==", "!=", ">", "<", ">=", "<="}
-	opsText   = []string{"==", "!=", "contains"}
+	opsEnum   = []string{"==", "!=", "in"}
+	opsString = []string{"==", "!=", "contains", "matches", "startswith", "in"}
+	opsNumber = []string{"==", "!=", ">", "<", ">=", "<=", "in"}
+	opsText   = []string{"==", "!=", "contains", "matches", "startswith"}
 )
 
 // fieldCatalog is the authoritative list of everything the IFL autocomplete

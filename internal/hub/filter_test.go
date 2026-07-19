@@ -349,3 +349,138 @@ func TestCompileFilterDoS(t *testing.T) {
 		t.Error("expected the sample (http POST in shop) to be excluded by the negation")
 	}
 }
+
+// TestMatchesOperator exercises the regex "matches" operator.
+func TestMatchesOperator(t *testing.T) {
+	e := sample() // Request.Path == "/api/checkout"
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`request.path matches "^/api/"`, true},
+		{`request.path matches "^/v[0-9]+/"`, false},
+		{`request.path matches "check.ut"`, true}, // "." matches any char, unanchored
+		{`request.host matches "^payment"`, true},
+		{`request.host matches "^shop"`, false},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+func TestMatchesOperatorRejectsInvalidRegex(t *testing.T) {
+	if _, err := CompileFilter(`request.path matches "(unclosed"`); err == nil {
+		t.Error("an invalid regex should fail to compile, got nil error")
+	}
+}
+
+func TestMatchesOperatorRejectsOversizedPattern(t *testing.T) {
+	huge := strings.Repeat("a", maxRegexLen+1)
+	if _, err := CompileFilter(`request.path matches "` + huge + `"`); err == nil {
+		t.Error("an oversized regex pattern should be rejected, got nil error")
+	}
+}
+
+// TestStartswithOperator exercises the "startswith" operator (case-insensitive
+// prefix match).
+func TestStartswithOperator(t *testing.T) {
+	e := sample() // Request.Host == "payment.shop"
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`request.host startswith "payment"`, true},
+		{`request.host startswith "PAYMENT"`, true}, // case-insensitive
+		{`request.host startswith "shop"`, false},
+		{`request.path startswith "/api"`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+// TestInOperator exercises the "in (...)" list-membership operator: quoted
+// strings, bare numbers, case-insensitivity, and the either-side namespace
+// pseudo-field.
+func TestInOperator(t *testing.T) {
+	e := sample() // dst.namespace == "shop", response.status == 503
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`dst.namespace in ("shop", "platform")`, true},
+		{`dst.namespace in ("PLATFORM", "SHOP")`, true}, // case-insensitive
+		{`dst.namespace in ("prod", "staging")`, false},
+		{`response.status in (500, 502, 503)`, true},
+		{`response.status in (200, 201)`, false},
+		{`namespace in ("shop")`, true},    // either-side pseudo-field
+		{`namespace in ("kube-system")`, false},
+		{`protocol in ("http", "dns")`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+func TestInOperatorSyntaxErrors(t *testing.T) {
+	cases := []string{
+		`dst.namespace in`,                // missing list entirely
+		`dst.namespace in "shop"`,          // missing parens
+		`dst.namespace in (`,               // unterminated
+		`dst.namespace in ()`,              // empty list
+		`dst.namespace in ("shop"`,         // missing closing paren
+		`dst.namespace in ("shop" "prod")`, // missing comma
+	}
+	for _, expr := range cases {
+		if _, err := CompileFilter(expr); err == nil {
+			t.Errorf("CompileFilter(%q) should have errored", expr)
+		}
+	}
+}
+
+func TestInOperatorRejectsOversizedList(t *testing.T) {
+	var items []string
+	for i := 0; i < maxInListLen+1; i++ {
+		items = append(items, `"x"`)
+	}
+	expr := `dst.namespace in (` + strings.Join(items, ", ") + `)`
+	if _, err := CompileFilter(expr); err == nil {
+		t.Error("an oversized in-list should be rejected, got nil error")
+	}
+}
+
+// An unknown field must still be a compile error with the new operators, same
+// as with ==/!=/contains.
+func TestNewOperatorsRejectUnknownField(t *testing.T) {
+	cases := []string{
+		`bogus.field matches "x"`,
+		`bogus.field startswith "x"`,
+		`bogus.field in ("x")`,
+	}
+	for _, expr := range cases {
+		if _, err := CompileFilter(expr); err == nil {
+			t.Errorf("CompileFilter(%q) should have errored on an unknown field", expr)
+		}
+	}
+}

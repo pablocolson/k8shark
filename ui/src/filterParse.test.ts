@@ -68,6 +68,30 @@ describe("contextAt", () => {
       caret: 31,
       expect: { kind: "field", prefix: "dst.name" },
     },
+    {
+      name: "'matches' recognized as a complete operator -> value",
+      input: "request.path matches ",
+      caret: 22,
+      expect: { kind: "value", prefix: "", fieldName: "request.path" },
+    },
+    {
+      name: "'startswith' recognized as a complete operator -> value",
+      input: "request.host startswith ",
+      caret: 25,
+      expect: { kind: "value", prefix: "", fieldName: "request.host" },
+    },
+    {
+      name: "'in' recognized as a complete operator -> value",
+      input: "dst.namespace in ",
+      caret: 18,
+      expect: { kind: "value", prefix: "", fieldName: "dst.namespace" },
+    },
+    {
+      name: "'matches' still being typed -> still operator (suggests the completion)",
+      input: "request.path match",
+      caret: 18,
+      expect: { kind: "operator", prefix: "match", fieldName: "request.path" },
+    },
   ];
 
   for (const c of cases) {

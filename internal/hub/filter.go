@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,13 @@ const (
 	// a pathological expression can't overflow the goroutine stack and crash the
 	// hub.
 	maxFilterDepth = 64
+	// maxInListLen bounds how many literals an "in (...)" list may hold.
+	maxInListLen = 64
+	// maxRegexLen bounds a "matches" operator's pattern length. RE2 (Go's
+	// regexp package) has no catastrophic backtracking, but an unbounded
+	// pattern could still compile into an expensive automaton (e.g. deeply
+	// nested repetition counts), so bound the source text as cheap defense.
+	maxRegexLen = 256
 )
 
 // CompileFilter parses an IFL (k8shark filter language) expression into a
@@ -31,7 +39,8 @@ const (
 //	not (src.name contains "canary")
 //	"checkout"                      # bare token = full-text substring match
 //
-// Supported operators: == != contains > < >= <= ; boolean and/or/not with
+// Supported operators: == != contains matches startswith > < >= <= ; a list
+// membership test, field in ("a", "b", "c"); boolean and/or/not with
 // parentheses. An empty expression matches everything.
 func CompileFilter(expr string) (Predicate, error) {
 	expr = strings.TrimSpace(expr)
@@ -67,6 +76,7 @@ const (
 	tOp
 	tLParen
 	tRParen
+	tComma
 	tAnd
 	tOr
 	tNot
@@ -90,6 +100,9 @@ func lex(s string) ([]token, error) {
 			i++
 		case c == ')':
 			toks = append(toks, token{tRParen, ")"})
+			i++
+		case c == ',':
+			toks = append(toks, token{tComma, ","})
 			i++
 		case c == '"' || c == '\'':
 			quote := c
@@ -117,7 +130,7 @@ func lex(s string) ([]token, error) {
 		default:
 			// identifier / number / keyword run
 			j := i
-			for j < len(s) && !strings.ContainsRune(" \t\n()=!<>\"'", rune(s[j])) {
+			for j < len(s) && !strings.ContainsRune(" \t\n()=!<>\"',", rune(s[j])) {
 				j++
 			}
 			word := s[i:j]
@@ -131,8 +144,8 @@ func lex(s string) ([]token, error) {
 				toks = append(toks, token{tOr, word})
 			case "not":
 				toks = append(toks, token{tNot, word})
-			case "contains":
-				toks = append(toks, token{tOp, "contains"})
+			case "contains", "matches", "startswith", "in":
+				toks = append(toks, token{tOp, strings.ToLower(word)})
 			default:
 				if _, err := strconv.ParseFloat(word, 64); err == nil {
 					toks = append(toks, token{tNumber, word})
@@ -254,12 +267,50 @@ func (p *parser) parseComparison() (Predicate, error) {
 	p.pos++
 	op := p.cur().val
 	p.pos++
+
+	// "in" takes a parenthesized value list instead of a single value token,
+	// and (unlike ==/!=) has no negation duality to worry about for the
+	// namespace/ns either-side pseudo-field, so it's built directly here
+	// rather than falling through to compare()'s single-value shape.
+	if op == "in" {
+		values, err := p.parseInList()
+		if err != nil {
+			return nil, err
+		}
+		match := func(actual string) bool {
+			for _, v := range values {
+				if strings.EqualFold(actual, v) {
+					return true
+				}
+			}
+			return false
+		}
+		return buildFieldPredicate(field, match)
+	}
+
 	if p.pos >= len(p.toks) {
 		return nil, fmt.Errorf("expected value after %q", op)
 	}
 	valTok := p.cur()
 	p.pos++
 	val := valTok.val
+
+	switch op {
+	case "matches":
+		if len(val) > maxRegexLen {
+			return nil, fmt.Errorf("field %q: pattern too long (%d bytes, max %d)", field, len(val), maxRegexLen)
+		}
+		re, err := regexp.Compile(val)
+		if err != nil {
+			return nil, fmt.Errorf("field %q: invalid regex %q: %w", field, val, err)
+		}
+		return buildFieldPredicate(field, re.MatchString)
+	case "startswith":
+		needle := strings.ToLower(val)
+		return buildFieldPredicate(field, func(actual string) bool {
+			return strings.HasPrefix(strings.ToLower(actual), needle)
+		})
+	}
 
 	// namespace/ns matches either side (src or dst) rather than a single
 	// struct field, so it can't go through the single-getter-then-compare
@@ -288,6 +339,56 @@ func (p *parser) parseComparison() (Predicate, error) {
 	return func(e *api.Entry) bool {
 		return compare(getter(e), op, val)
 	}, nil
+}
+
+// parseInList parses a parenthesized, comma-separated literal list after
+// "in": ("prod", "staging") or (500, 502, 503). Values may be quoted strings
+// or bare identifiers/numbers.
+func (p *parser) parseInList() ([]string, error) {
+	if p.cur().kind != tLParen {
+		return nil, fmt.Errorf(`expected "(" after "in"`)
+	}
+	p.pos++
+	var values []string
+	for {
+		t := p.cur()
+		switch t.kind {
+		case tString, tNumber, tIdent:
+			values = append(values, t.val)
+			p.pos++
+		default:
+			return nil, fmt.Errorf(`expected a value in "in (...)" list, got %q`, t.val)
+		}
+		if len(values) > maxInListLen {
+			return nil, fmt.Errorf(`"in (...)" list too long (max %d values)`, maxInListLen)
+		}
+		if p.cur().kind == tRParen {
+			p.pos++
+			return values, nil
+		}
+		if p.cur().kind != tComma {
+			return nil, fmt.Errorf(`expected "," or ")" in "in (...)" list, got %q`, p.cur().val)
+		}
+		p.pos++
+	}
+}
+
+// buildFieldPredicate resolves field to its value(s) and applies match: the
+// namespace/ns either-side pseudo-field checks both endpoints (OR-combined —
+// "true if either side satisfies it", the same inclusion reading == and
+// contains already use above), any other field its single resolved value.
+func buildFieldPredicate(field string, match func(actual string) bool) (Predicate, error) {
+	fieldLower := strings.ToLower(field)
+	if fieldLower == "namespace" || fieldLower == "ns" {
+		return func(e *api.Entry) bool {
+			return match(e.Source.Namespace) || match(e.Destination.Namespace)
+		}, nil
+	}
+	getter := fieldGetter(field)
+	if getter == nil {
+		return nil, fmt.Errorf("unknown filter field %q (GET /api/fields lists the catalog)", field)
+	}
+	return func(e *api.Entry) bool { return match(getter(e)) }, nil
 }
 
 // compare evaluates "actual op want". Numeric comparison is used when both

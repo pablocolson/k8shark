@@ -19,7 +19,7 @@ TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
 **Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
 implémentés (commits `ec1a47f`, `5a985d2`).
 
-**Phase 2 — en cours (5/9).**
+**Phase 2 — en cours (6/9).**
 
 - CAP-1 : programme cBPF généré au runtime (`internal/worker/capture/bpf.go`,
   symbolique via `golang.org/x/net/bpf`, vérifié par `bpf.VM` sur des trames
@@ -54,9 +54,18 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   les groupes apparus/disparus. Vérifié en bout en bout via stdio JSON-RPC
   contre un hub réel (`make dev`).
 
-Prochain item logique par valeur/effort : **HUB-2** (opérateurs IFL
-regex/in/startswith, M) ou **DIS-5** (sniff Redis/Postgres/AMQP sur ports non
-standard, S).
+- HUB-2 : opérateurs IFL `matches` (regex RE2, motif borné à 256 octets),
+  `startswith` et `in ("a", "b", ...)` (liste bornée à 64 valeurs) —
+  `internal/hub/filter.go` (lexer : virgule + nouveaux mots-clés ; parser :
+  `parseInList`, `buildFieldPredicate` partagé avec le either-side
+  namespace/ns existant), opérateurs ajoutés à `facets.go` (`opsString` etc.,
+  reflétés par `/api/fields`), tokenizer d'autocomplete front
+  (`ui/src/filterParse.ts`) resynchronisé. Vérifié en navigateur (dropdown
+  d'opérateurs + filtre `in` appliqué en direct) en plus des tests unitaires
+  des deux côtés.
+
+Prochain item logique par valeur/effort : **DIS-5** (sniff Redis/Postgres/AMQP
+sur ports non standard, S) ou **MCP-3** (outil find_error_clusters, M).
 
 ## Phases proposées
 
