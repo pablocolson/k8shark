@@ -1,5 +1,6 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { curlCommand } from "../curl";
 import type { Entry, L4Info, Payload, PGColumn, RawView } from "../types";
 
 type TabId = "overview" | "request" | "response" | "headers" | "body" | "raw" | "l4";
@@ -34,6 +35,7 @@ export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => v
       <div className="detail-head">
         <span className={`proto-badge big st-${entry.status}`}>{entry.protocol}</span>
         <span className="detail-title mono">{entry.request.summary}</span>
+        {entry.protocol === "http" && <CurlButton entry={entry} />}
         <button className="icon-btn" onClick={onClose} title="close" aria-label="close">
           ✕
         </button>
@@ -520,6 +522,30 @@ function Meta({ k, v }: { k: string; v: string }) {
       <span className="meta-k">{k}</span>
       <span className="meta-v mono">{v}</span>
     </div>
+  );
+}
+
+function CurlButton({ entry }: { entry: Entry }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      await navigator.clipboard.writeText(curlCommand(entry));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable or permission denied — nothing to recover.
+    }
+  };
+  return (
+    <button
+      type="button"
+      className="toggle"
+      onClick={onClick}
+      title="copy this request as a curl command"
+      aria-label="copy this request as a curl command"
+    >
+      {copied ? "✓ copied" : "curl"}
+    </button>
   );
 }
 

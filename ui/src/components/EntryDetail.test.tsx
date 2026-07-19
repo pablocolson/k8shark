@@ -96,6 +96,24 @@ describe("EntryDetail", () => {
     expect(JSON.parse(writeText.mock.calls[0][0])).toEqual({ ok: true, count: 3 });
   });
 
+  it("copies the request as a curl command from the header button", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    render(<EntryDetail entry={httpEntry} onClose={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /copy this request as a curl command/i }));
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toBe("curl -X 'POST' 'http://backend/api/cart' -H 'content-type: application/json'");
+  });
+
+  it("does not show a curl button for a non-HTTP entry", () => {
+    const dnsEntry: Entry = { ...httpEntry, protocol: "dns" };
+    render(<EntryDetail entry={dnsEntry} onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /copy this request as a curl command/i })).not.toBeInTheDocument();
+  });
+
   it("does not render a body tab for an entry with no body", () => {
     const noBody: Entry = { ...httpEntry, request: { ...httpEntry.request, }, response: { ...httpEntry.response, body: undefined } };
     render(<EntryDetail entry={noBody} onClose={vi.fn()} />);
