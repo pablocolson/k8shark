@@ -253,16 +253,23 @@ func (s *Server) registerTools() {
 		"src.name, src.namespace, src.workload, dst.name, dst.namespace, dst.workload, request.path, " +
 		"dns.rcode, redis.command, postgres.query. Operators: == != contains > < >= <=, combined with " +
 		"and/or/not. Unknown field names are rejected — call list_filter_fields for the full catalog."
+	// timeFormatDesc documents the accepted since/until formats once for every
+	// tool with a time argument, diff_traffic's four included.
+	const timeFormatDesc = "RFC3339 (\"2026-07-15T14:00:00Z\"), unix seconds, or a relative duration meaning that long ago (\"15m\", \"1h\")."
 	timeProps := func() (map[string]any, map[string]any) {
 		return map[string]any{
 				"type":        "string",
-				"description": "Only entries at/after this time: RFC3339 (\"2026-07-15T14:00:00Z\"), unix seconds, or a relative duration meaning that long ago (\"15m\", \"1h\").",
+				"description": "Only entries at/after this time: " + timeFormatDesc,
 			}, map[string]any{
 				"type":        "string",
 				"description": "Only entries at/before this time (same formats as since).",
 			}
 	}
 	sinceProp, untilProp := timeProps()
+	// groupByDesc documents the group_by grouping key once for both
+	// get_traffic_summary and diff_traffic.
+	const groupByDesc = "Grouping key: \"workload\" (default; namespace/workload across both endpoints), " +
+		"\"namespace\", or any IFL field (e.g. dst.name, protocol, node, http.method)."
 	s.tools = []*tool{
 		{
 			name: "get_stats",
@@ -309,14 +316,10 @@ func (s *Server) registerTools() {
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"group_by": map[string]any{
-						"type": "string",
-						"description": "Grouping key: \"workload\" (default; namespace/workload across both endpoints), " +
-							"\"namespace\", or any IFL field (e.g. dst.name, protocol, node, http.method).",
-					},
-					"filter": map[string]any{"type": "string", "description": filterDesc},
-					"since":  sinceProp,
-					"until":  untilProp,
+					"group_by": map[string]any{"type": "string", "description": groupByDesc},
+					"filter":   map[string]any{"type": "string", "description": filterDesc},
+					"since":    sinceProp,
+					"until":    untilProp,
 					"limit": map[string]any{
 						"type":        "number",
 						"description": "Maximum groups to return (default 25, busiest first).",
@@ -324,6 +327,32 @@ func (s *Server) registerTools() {
 				},
 			},
 			handler: s.handleTrafficSummary,
+		},
+		{
+			name: "diff_traffic",
+			description: "Compare traffic between two time windows per group (e.g. a baseline \"before\" period vs " +
+				"a \"during/after\" period around an incident): volume, error-rate and p95 latency deltas, sorted by " +
+				"the strongest error-rate regression first. Flags groups that appeared (new traffic/errors, absent " +
+				"from the baseline) or disappeared (traffic stopped, absent from the current window). Calls " +
+				"get_traffic_summary's underlying endpoint twice and diffs the results — the fastest way to answer " +
+				"\"what changed since the incident started?\" without doing that comparison yourself.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"baseline_since": map[string]any{"type": "string", "description": "Start of the baseline (\"before\") window: " + timeFormatDesc},
+					"baseline_until": map[string]any{"type": "string", "description": "End of the baseline window (same formats as baseline_since)."},
+					"current_since":  map[string]any{"type": "string", "description": "Start of the current (\"during\"/\"after\") window: " + timeFormatDesc},
+					"current_until":  map[string]any{"type": "string", "description": "End of the current window (same formats as current_since)."},
+					"group_by":       map[string]any{"type": "string", "description": groupByDesc},
+					"filter":         map[string]any{"type": "string", "description": filterDesc},
+					"limit": map[string]any{
+						"type":        "number",
+						"description": "Maximum groups to return (default 20, strongest regressions first).",
+					},
+				},
+				"required": []string{"baseline_since", "baseline_until", "current_since", "current_until"},
+			},
+			handler: s.handleDiffTraffic,
 		},
 		{
 			name: "get_timeline",
