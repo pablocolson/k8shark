@@ -295,6 +295,13 @@ func redisDisplay(s string) string {
 	if isRedisPrintable(s) {
 		return truncate(s, redisMaxValueDisplay)
 	}
+	return binaryPreview(s)
+}
+
+// binaryPreview renders s (assumed non-printable) as a bounded \xHH hex
+// preview plus its true byte length — e.g. "\x1f8b0800… (614 bytes)" —
+// shared by redisDisplay and safeBody (pipeline.go, for HTTP/AMQP bodies).
+func binaryPreview(s string) string {
 	const hexPreview = 32
 	b := []byte(s)
 	if len(b) > hexPreview {

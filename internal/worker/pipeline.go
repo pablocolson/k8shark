@@ -3,6 +3,8 @@ package worker
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"io"
 	"log/slog"
 	"net/http"
@@ -365,11 +367,12 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 				continue
 			}
 			body, truncated, full := p.drainBody(resp.Body)
+			body, truncated = decompressBody(body, truncated, resp.Header.Get("Content-Encoding"), p.bodyCap)
 			ct := resp.Header.Get("Content-Type")
 			p.completeResponse(key, api.Payload{
 				StatusCode:  resp.StatusCode,
 				Headers:     p.flattenHeaders(resp.Header),
-				Body:        body,
+				Body:        safeBody(body),
 				Truncated:   truncated,
 				Size:        full,
 				ContentType: ct,
@@ -387,13 +390,14 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 			return
 		}
 		body, truncated, full := p.drainBody(req.Body)
+		body, truncated = decompressBody(body, truncated, req.Header.Get("Content-Encoding"), p.bodyCap)
 		ct := req.Header.Get("Content-Type")
 		p.enqueueRequest(key, api.ProtocolHTTP, api.Payload{
 			Method:      req.Method,
 			Path:        redactedRequestURI(req.URL, p.redactHeaders),
 			Host:        req.Host,
 			Headers:     p.flattenHeaders(req.Header),
-			Body:        body,
+			Body:        safeBody(body),
 			Truncated:   truncated,
 			Size:        full,
 			ContentType: ct,
@@ -560,6 +564,62 @@ func (p *pipeline) drainBody(rc io.ReadCloser) (body string, truncated bool, ful
 	n, _ := io.Copy(&b, io.LimitReader(rc, int64(p.bodyCap-1)))
 	extra, _ := io.Copy(io.Discard, rc) // consume the rest so the stream advances
 	return b.String(), extra > 0, 1 + int(n) + int(extra)
+}
+
+// decompressBody transparently inflates a gzip/deflate-encoded HTTP body so
+// it's readable in the UI and matchable by request.body/response.body
+// filters, which otherwise never see anything but opaque compressed bytes —
+// the majority of real-world HTTP APIs respond compressed. body is the
+// already bodyCap-bounded raw (compressed) bytes drainBody produced, so
+// decompression only ever processes at most bodyCap input bytes; the output
+// is separately capped at limit bytes as a zip-bomb guard, since a small
+// compressed payload can still expand enormously. A body that was itself cut
+// off mid-stream, or that isn't actually valid gzip/deflate despite the
+// header, falls back to the original bytes unchanged rather than erroring.
+func decompressBody(body string, truncated bool, contentEncoding string, limit int) (string, bool) {
+	if body == "" || limit <= 0 {
+		return body, truncated
+	}
+	var zr io.Reader
+	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
+	case "gzip":
+		gr, err := gzip.NewReader(strings.NewReader(body))
+		if err != nil {
+			return body, truncated
+		}
+		defer gr.Close()
+		zr = gr
+	case "deflate":
+		fr := flate.NewReader(strings.NewReader(body))
+		defer fr.Close()
+		zr = fr
+	default:
+		return body, truncated
+	}
+
+	var out bytes.Buffer
+	n, err := io.CopyN(&out, zr, int64(limit)+1)
+	if n == 0 && err != nil && err != io.EOF {
+		return body, truncated // header claimed gzip/deflate but the body isn't
+	}
+	decompressed := out.String()
+	if int64(len(decompressed)) > int64(limit) {
+		decompressed = decompressed[:limit]
+		truncated = true
+	}
+	return decompressed, truncated
+}
+
+// safeBody replaces a non-printable body with a bounded hex preview plus its
+// true byte length, instead of storing raw bytes that would corrupt JSON/UI
+// rendering. Printable UTF-8 passes through unchanged. Applies to HTTP and
+// AMQP bodies, mirroring how dissect_redis.go's redisDisplay already renders
+// binary Redis values.
+func safeBody(s string) string {
+	if isRedisPrintable(s) {
+		return s
+	}
+	return binaryPreview(s)
 }
 
 // capReader tees up to max bytes into buf while passing every read through. It

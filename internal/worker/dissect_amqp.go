@@ -363,7 +363,7 @@ func (p *pipeline) emitAMQPMethod(isClient bool, c connID, cr *capReader, info a
 
 func (p *pipeline) emitAMQPContent(isClient bool, c connID, cr *capReader, pend *amqpPending) {
 	summary := amqpSummary(pend.info, pend.bodySize)
-	req := amqpPayload(pend.info, summary, string(pend.body), int(pend.bodySize))
+	req := amqpPayload(pend.info, summary, safeBody(string(pend.body)), int(pend.bodySize))
 	req.Raw = rawOf(cr)
 	p.emitAMQP(isClient, c, req, api.Payload{Summary: summary}, amqpStatus(pend.info))
 }

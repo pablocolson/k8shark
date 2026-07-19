@@ -19,13 +19,23 @@ TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
 **Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
 implémentés (commits `ec1a47f`, `5a985d2`).
 
-**Phase 2 — en cours (1/9).** CAP-1 implémenté : programme cBPF généré au
-runtime (`internal/worker/capture/bpf.go`, symbolique via `golang.org/x/net/bpf`,
-vérifié par `bpf.VM` sur des trames synthétiques IPv4/IPv6/fragments), ports
-opérateur (`--redis-ports`/`--valkey-ports`/`--amqp-ports`) et nouveau
-`--http-ports` désormais tous reflétés dans le filtre kernel — plus seulement
-le dispatch userspace. Prochain item logique par valeur/effort : **UI-3**
-(copier en cURL, S) ou **DIS-4** (décompression bornée des bodies HTTP, S).
+**Phase 2 — en cours (2/9).**
+
+- CAP-1 : programme cBPF généré au runtime (`internal/worker/capture/bpf.go`,
+  symbolique via `golang.org/x/net/bpf`, vérifié par `bpf.VM` sur des trames
+  synthétiques IPv4/IPv6/fragments), ports opérateur
+  (`--redis-ports`/`--valkey-ports`/`--amqp-ports`) et nouveau `--http-ports`
+  désormais tous reflétés dans le filtre kernel — plus seulement le dispatch
+  userspace.
+- DIS-4 : bodies HTTP gzip/deflate décompressés à la volée
+  (`decompressBody`, pipeline.go) avec garde anti zip-bomb sur la taille de
+  sortie décompressée (bornée à `bodyCap`, indépendamment du taux de
+  compression) ; helper `safeBody` partagé (réutilise `isRedisPrintable`) qui
+  remplace un body binaire non imprimable par un aperçu hex + taille,
+  appliqué aux bodies HTTP et AMQP.
+
+Prochain item logique par valeur/effort : **UI-3** (copier en cURL, S) ou
+**HUB-2** (opérateurs IFL regex/in/startswith, M).
 
 ## Phases proposées
 
