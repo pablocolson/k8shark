@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "k8shark.labels" . | nindent 4 }}
 ---
+{{- /* hubCA: workers must verify the hub's TLS cert against the ca.crt
+     shipped in the TLS secret (cert-manager includes one). Only the ca.crt
+     key is projected — the DaemonSet must never see the hub's private key. */}}
+{{- $hubCA := and .Values.hub.tls.enabled .Values.hub.tls.caFromSecret }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -35,7 +39,10 @@ spec:
           imagePullPolicy: {{ include "k8shark.imagePullPolicy" . }}
           args:
             - worker
-            - --hub=ws://k8shark-hub.{{ .Release.Namespace }}.svc:{{ .Values.hub.port }}/ws/worker
+            - --hub={{ ternary "wss" "ws" .Values.hub.tls.enabled }}://k8shark-hub.{{ .Release.Namespace }}.svc:{{ .Values.hub.port }}/ws/worker
+            {{- if $hubCA }}
+            - --hub-ca=/etc/k8shark/hub-ca/ca.crt
+            {{- end }}
             - --node=$(NODE_NAME)
             - --iface={{ .Values.worker.iface }}
             - --log-level={{ .Values.logLevel }}
@@ -121,24 +128,38 @@ spec:
                 - SYS_RESOURCE
                 - SYS_PTRACE
                 {{- end }}
-          {{- if .Values.worker.tls.enabled }}
+          {{- if or .Values.worker.tls.enabled $hubCA }}
           volumeMounts:
+            {{- if .Values.worker.tls.enabled }}
             - { name: bpffs, mountPath: /sys/fs/bpf, mountPropagation: HostToContainer }
             - { name: btf, mountPath: /sys/kernel/btf, readOnly: true }
             - { name: hostproc, mountPath: /host/proc, readOnly: true }
             {{- if .Values.worker.tls.debugfs }}
             - { name: debugfs, mountPath: /sys/kernel/debug }
             {{- end }}
+            {{- end }}
+            {{- if $hubCA }}
+            - { name: hub-ca, mountPath: /etc/k8shark/hub-ca, readOnly: true }
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-      {{- if .Values.worker.tls.enabled }}
+      {{- if or .Values.worker.tls.enabled $hubCA }}
       volumes:
+        {{- if .Values.worker.tls.enabled }}
         - { name: bpffs, hostPath: { path: /sys/fs/bpf, type: DirectoryOrCreate } }
         - { name: btf, hostPath: { path: /sys/kernel/btf, type: Directory } }
         - { name: hostproc, hostPath: { path: /proc, type: Directory } }
         {{- if .Values.worker.tls.debugfs }}
         - { name: debugfs, hostPath: { path: /sys/kernel/debug, type: Directory } }
+        {{- end }}
+        {{- end }}
+        {{- if $hubCA }}
+        - name: hub-ca
+          secret:
+            secretName: {{ .Values.hub.tls.secretName }}
+            items:
+              - { key: ca.crt, path: ca.crt }
         {{- end }}
       {{- end }}
       tolerations:

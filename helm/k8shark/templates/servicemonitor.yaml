@@ -20,4 +20,12 @@ spec:
     - port: hub
       path: /metrics
       interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
+      {{- if .Values.hub.tls.enabled }}
+      scheme: https
+      # The hub cert is issued for the Service DNS name by a private CA;
+      # skip verification here rather than requiring the CA to be wired
+      # into prometheus-operator (metrics carry no captured payloads).
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
 {{- end }}

@@ -26,6 +26,8 @@ spec:
               value: k8shark-hub.{{ .Release.Namespace }}.svc
             - name: HUB_PORT
               value: "{{ .Values.hub.port }}"
+            - name: HUB_SCHEME
+              value: {{ ternary "https" "http" .Values.hub.tls.enabled | quote }}
             # HUB_TOKEN is injected as a Bearer header on proxied requests, so
             # the dashboard keeps working when hub.apiToken is set (the front
             # service then becomes the intended access path to the data).

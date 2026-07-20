@@ -352,11 +352,36 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   complétés (`--worker-token`/`--admin-token`/`--allow-origin` de
   SEC-5/SEC-6), lignes de values `hub.workerToken`/`hub.adminToken`.
 
+**Backlog, lot 8 — SEC-7, TLS sur le hub (clôt le thème sécurité) :**
+
+- **SEC-7** : hub `--tls-cert`/`--tls-key` (PEM, validés ensemble à la CLI)
+  → `ListenAndServeTLS` : API, WebSockets et tokens ne transitent plus en
+  clair. Worker : `--hub-ca` (PEM) installe un `websocket.Dialer` avec
+  `RootCAs` custom (`sink.setHubCA`) pour vérifier un cert émis par une CA
+  privée sur `wss://` ; sans flag, racines système. Chart :
+  `hub.tls.{enabled,secretName,caFromSecret}` — Secret `kubernetes.io/tls`
+  (compatible cert-manager) monté dans le hub, garde-fou `fail` si activé
+  sans secretName, probes en `scheme: HTTPS`, l'URL worker passe en
+  `wss://` avec seul `ca.crt` projeté dans le DaemonSet (jamais la clé
+  privée), le nginx du front proxifie en `${HUB_SCHEME}` (nouvel env,
+  défaut http), annotations Prometheus `scheme: https` + ServiceMonitor
+  `scheme/tlsConfig`. Alternative mesh mTLS documentée dans values.yaml.
+
+  Vérifié en conditions réelles (cert auto-signé openssl, hub TLS + worker
+  démo réels) au 2026-07-20 : `/api/stats` en https OK avec entries au fil
+  de l'eau via wss, worker sans `--hub-ca` jamais enregistré (vérif cert
+  échoue), requête http en clair refusée par le serveur https. `helm lint`
+  + `helm template` propres (rendu TLS complet, défaut inchangé, garde-fou
+  déclenché). Tests : `TestSetHubCA`,
+  `TestSinkConnectsWSSWithCustomCA` (sink_test.go, vrai serveur WS TLS) ;
+  `go test -race ./...` (238 tests) propre.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4, OPS-6/7/10, SEC-7, TST-5/8,
+UI-7/8/11, MCP-1/4, OPS-6/7/10, TST-5/8,
 EXT-2/3/4/5.
-Prochain chantier logique : d'autres items S/M de ce backlog (SEC-7 apporte le
-TLS hub et clôt le thème sécurité ; MCP-1/MCP-4 étendent l'outillage agent),
+Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
+Prochain chantier logique : d'autres items S/M de ce backlog (MCP-1/MCP-4
+étendent l'outillage agent, HUB-4 le débit du fan-out, TST-5 le lint),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

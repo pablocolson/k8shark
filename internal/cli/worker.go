@@ -30,6 +30,7 @@ func workerCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.HubURL, "hub", "ws://localhost:8898/ws/worker", "hub worker WebSocket URL")
 	cmd.Flags().StringVar(&opts.HubToken, "hub-token", "", "bearer token for the hub connection (default $K8SHARK_API_TOKEN)")
+	cmd.Flags().StringVar(&opts.HubCA, "hub-ca", "", "PEM file with the CA verifying a wss:// hub certificate (default: system roots)")
 	cmd.Flags().StringVar(&opts.Node, "node", "", "node name to report (default: hostname)")
 	cmd.Flags().StringVar(&opts.Iface, "iface", "", "capture interface (default: any)")
 	cmd.Flags().BoolVar(&opts.Demo, "demo", false, "generate synthetic traffic instead of capturing")

@@ -14,5 +14,5 @@ FROM nginx:1.27-alpine
 # and an unsubstituted ${HUB_TOKEN} would be sent as a literal header.
 COPY build/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /ui/dist /usr/share/nginx/html
-ENV HUB_HOST=k8shark-hub HUB_PORT=8898 HUB_TOKEN=""
+ENV HUB_HOST=k8shark-hub HUB_PORT=8898 HUB_SCHEME=http HUB_TOKEN=""
 EXPOSE 80

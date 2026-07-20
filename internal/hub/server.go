@@ -54,6 +54,13 @@ type Options struct {
 	// and CORS headers, on top of the same-origin default (Origin host ==
 	// request Host). "*" restores the old allow-any behavior.
 	AllowedOrigins []string
+	// TLSCert/TLSKey are PEM file paths; when both are set the hub serves
+	// HTTPS/wss instead of plain HTTP/ws, so captured traffic (including
+	// eBPF-decrypted TLS bodies) and bearer tokens stop crossing the cluster
+	// network in clear text. Empty keeps plain HTTP (local dev, or a service
+	// mesh already providing mTLS).
+	TLSCert string
+	TLSKey  string
 }
 
 // Server is the hub. Construct with New and start with Run.
@@ -65,6 +72,8 @@ type Server struct {
 	workerToken  string
 	adminToken   string
 	allowOrigins []string
+	tlsCert      string
+	tlsKey       string
 
 	mu           sync.RWMutex
 	frontClients map[*frontClient]struct{}
@@ -115,6 +124,8 @@ func New(log *slog.Logger, opts Options) *Server {
 		workerToken:  opts.WorkerToken,
 		adminToken:   opts.AdminToken,
 		allowOrigins: opts.AllowedOrigins,
+		tlsCert:      opts.TLSCert,
+		tlsKey:       opts.TLSKey,
 		frontClients: map[*frontClient]struct{}{},
 		workers:      map[string]*workerInfo{},
 		workerConns:  map[string]chan []byte{},
@@ -169,7 +180,8 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	go s.statsLoop(ctx)
 	go s.resolver.run(ctx)
 
-	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "")
+	useTLS := s.tlsCert != "" && s.tlsKey != ""
+	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "", "tls", useTLS)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.handler(),
@@ -178,7 +190,13 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if useTLS {
+			err = srv.ListenAndServeTLS(s.tlsCert, s.tlsKey)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}

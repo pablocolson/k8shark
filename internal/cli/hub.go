@@ -19,6 +19,7 @@ func hubCmd() *cobra.Command {
 	var adminToken string
 	var bufferSize int
 	var allowOrigins []string
+	var tlsCert, tlsKey string
 	cmd := &cobra.Command{
 		Use:   "hub",
 		Short: "Run the hub server (aggregates worker traffic, serves the API)",
@@ -34,6 +35,9 @@ func hubCmd() *cobra.Command {
 			if adminToken == "" {
 				adminToken = os.Getenv("K8SHARK_ADMIN_TOKEN")
 			}
+			if (tlsCert == "") != (tlsKey == "") {
+				return fmt.Errorf("--tls-cert and --tls-key must be set together")
+			}
 			s := hub.New(log, hub.Options{
 				UIDir:          uiDir,
 				APIToken:       apiToken,
@@ -41,6 +45,8 @@ func hubCmd() *cobra.Command {
 				AdminToken:     adminToken,
 				BufferSize:     bufferSize,
 				AllowedOrigins: allowOrigins,
+				TLSCert:        tlsCert,
+				TLSKey:         tlsKey,
 			})
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -54,5 +60,7 @@ func hubCmd() *cobra.Command {
 	cmd.Flags().StringVar(&adminToken, "admin-token", "", "distinct bearer token required on mutating /api calls, also grants reads (default $K8SHARK_ADMIN_TOKEN; empty falls back to the API token)")
 	cmd.Flags().IntVar(&bufferSize, "buffer", 0, "in-memory entry buffer size (0 = default 10000)")
 	cmd.Flags().StringArrayVar(&allowOrigins, "allow-origin", nil, "extra browser Origin allowed on the API and WebSockets, repeatable (default: same-origin only; \"*\" allows any)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate file; with --tls-key, serve HTTPS/wss instead of plain HTTP")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key file for --tls-cert")
 	return cmd
 }

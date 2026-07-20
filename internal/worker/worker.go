@@ -6,6 +6,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -20,8 +21,9 @@ import (
 
 // Options configures a worker run.
 type Options struct {
-	HubURL   string // ws:// URL of the hub worker endpoint
+	HubURL   string // ws:// (or wss://, when the hub serves TLS) URL of the hub worker endpoint
 	HubToken string // bearer token for the hub connection ("" = no auth)
+	HubCA    string // PEM file with the CA verifying a wss:// hub cert ("" = system roots)
 	Node     string // node name this worker reports as
 	Iface    string // capture interface ("" = any)
 	Demo     bool   // force synthetic traffic instead of live capture
@@ -76,6 +78,11 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 		opts.DemoRPS = 25
 	}
 	s := newSink(opts.HubURL, opts.HubToken, opts.Node, log)
+	if opts.HubCA != "" {
+		if err := s.setHubCA(opts.HubCA); err != nil {
+			return fmt.Errorf("loading --hub-ca: %w", err)
+		}
+	}
 	go s.run(ctx)
 
 	stop := ctx.Done()

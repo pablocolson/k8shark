@@ -2,10 +2,14 @@ package worker
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +36,7 @@ type sink struct {
 	hubToken string // bearer token sent on dial ("" = no auth)
 	node     string
 	log      *slog.Logger
+	dialer   *websocket.Dialer // DefaultDialer unless setHubCA installed a custom root pool
 
 	ch      chan *api.Entry
 	dropped atomic.Uint64 // entries dropped on a full buffer
@@ -72,8 +77,28 @@ func newSink(hubURL, hubToken, node string, log *slog.Logger) *sink {
 		hubToken: hubToken,
 		node:     node,
 		log:      log,
+		dialer:   websocket.DefaultDialer,
 		ch:       make(chan *api.Entry, 1024),
 	}
+}
+
+// setHubCA installs a custom CA (PEM file) for verifying a wss:// hub
+// certificate — needed when the hub's cert is issued by a private CA
+// (cert-manager) rather than one in the system roots. Must be called before
+// run.
+func (s *sink) setHubCA(path string) error {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("no CA certificates found in %s", path)
+	}
+	d := *websocket.DefaultDialer
+	d.TLSClientConfig = &tls.Config{RootCAs: pool}
+	s.dialer = &d
+	return nil
 }
 
 // paused reports whether the hub has told this worker to stop turning
@@ -138,7 +163,7 @@ func (s *sink) connect() error {
 	if s.hubToken != "" {
 		hdr = http.Header{"Authorization": {"Bearer " + s.hubToken}}
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), hdr)
+	conn, _, err := s.dialer.Dial(u.String(), hdr)
 	if err != nil {
 		return err
 	}

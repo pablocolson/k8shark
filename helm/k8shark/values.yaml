@@ -58,6 +58,22 @@ hub:
   # hand (port-forward + Authorization header) when you need them.
   # Empty falls back to apiToken (single-token behavior).
   adminToken: ""
+  # tls: serve the hub API/WebSockets over HTTPS/wss, so captured traffic
+  # (including eBPF-decrypted TLS bodies) and bearer tokens stop crossing the
+  # cluster network in clear text. Workers switch to wss:// automatically and
+  # the front nginx proxies over https; probes and scrape config follow.
+  # Alternative: leave this off and run a service mesh providing mTLS.
+  tls:
+    enabled: false
+    # secretName: a kubernetes.io/tls Secret in the release namespace
+    # (tls.crt/tls.key) — a cert-manager Certificate works as-is. The cert
+    # must cover k8shark-hub.<namespace>.svc. Required when enabled.
+    secretName: ""
+    # caFromSecret: project the secret's ca.crt (cert-manager includes it)
+    # into workers so they verify the hub cert against the issuing CA; only
+    # the ca.crt key is mounted, never the private key. Disable when the
+    # cert chains to a public/system root.
+    caFromSecret: true
   resources:
     requests:
       cpu: 100m

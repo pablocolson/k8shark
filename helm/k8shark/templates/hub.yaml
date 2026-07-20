@@ -61,6 +61,9 @@ stringData:
 {{- if gt (int .Values.hub.replicas) 1 }}
 {{- fail "hub.replicas > 1 is not supported: the ring buffer, worker registry and WebSocket fan-out are all in-memory state local to one pod, so a second replica silently sees only part of the traffic/workers/clients rather than sharing state. Keep hub.replicas at 1." }}
 {{- end }}
+{{- if and .Values.hub.tls.enabled (not .Values.hub.tls.secretName) }}
+{{- fail "hub.tls.enabled requires hub.tls.secretName: a kubernetes.io/tls Secret (tls.crt/tls.key) in the release namespace, e.g. issued by a cert-manager Certificate for k8shark-hub.<namespace>.svc." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,6 +89,9 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.hub.port | quote }}
         prometheus.io/path: /metrics
+        {{- if .Values.hub.tls.enabled }}
+        prometheus.io/scheme: https
+        {{- end }}
     spec:
       serviceAccountName: k8shark-hub
       {{- with .Values.priorityClassName }}
@@ -105,6 +111,10 @@ spec:
             - --log-level={{ .Values.logLevel }}
             {{- if .Values.hub.bufferSize }}
             - --buffer={{ .Values.hub.bufferSize }}
+            {{- end }}
+            {{- if .Values.hub.tls.enabled }}
+            - --tls-cert=/etc/k8shark/tls/tls.crt
+            - --tls-key=/etc/k8shark/tls/tls.key
             {{- end }}
           {{- if or .Values.hub.apiToken .Values.hub.workerToken .Values.hub.adminToken }}
           env:
@@ -137,12 +147,18 @@ spec:
             httpGet:
               path: /healthz
               port: {{ .Values.hub.port }}
+              {{- if .Values.hub.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: {{ .Values.hub.port }}
+              {{- if .Values.hub.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 10
             periodSeconds: 10
           securityContext:
@@ -150,8 +166,18 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
             seccompProfile: { type: RuntimeDefault }
+          {{- if .Values.hub.tls.enabled }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/k8shark/tls, readOnly: true }
+          {{- end }}
           resources:
             {{- toYaml .Values.hub.resources | nindent 12 }}
+      {{- if .Values.hub.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.hub.tls.secretName }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -119,7 +119,9 @@ Hub flags of note: `--buffer` (in-memory entry ring size), `--api-token`
 `$K8SHARK_API_TOKEN`), `--worker-token` / `--admin-token` (distinct
 credentials for the worker ingest channel and the mutating control endpoints;
 each falls back to the API token when unset), `--allow-origin` (extra browser
-Origins allowed on the API/WebSockets; default is same-origin only).
+Origins allowed on the API/WebSockets; default is same-origin only),
+`--tls-cert` / `--tls-key` (serve HTTPS/wss; the worker takes `--hub-ca` to
+verify a private-CA cert on its `wss://` hub connection).
 
 ## Configuration (Helm values)
 
@@ -133,6 +135,7 @@ Origins allowed on the API/WebSockets; default is same-origin only).
 | `hub.apiToken` | `""` | When set, `/api` + WebSockets require this bearer token; workers and the front proxy get it via a Secret. |
 | `hub.workerToken` | `""` | Distinct token required on `/ws/worker` (entry ingest); the worker DaemonSet picks it up automatically. Falls back to `apiToken`. |
 | `hub.adminToken` | `""` | Distinct token required on mutating API calls (capture pause/resume), also grants reads. Falls back to `apiToken`. |
+| `hub.tls.enabled` | `false` | Serve the hub over HTTPS/wss from `hub.tls.secretName` (a `kubernetes.io/tls` Secret, cert-manager compatible). Workers, the front proxy, probes and scrape config all switch automatically. |
 | `pdb.enabled` | `true` | PodDisruptionBudget protecting the hub during node drains. |
 | `worker.demo` | `false` | Generate synthetic traffic instead of capturing (opt-in only). |
 | `worker.iface` | `""` | Capture interface (`""` = any). |
