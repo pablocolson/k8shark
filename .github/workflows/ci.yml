@@ -47,6 +47,22 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+      # Short fuzz smoke over the dissectors and the IFL parser. `go test`
+      # above already runs each target's seed corpus; this explores a little
+      # further to catch panics on hostile input on every PR. Kept brief so it
+      # doesn't dominate CI time — the deeper campaigns run via `make fuzz`.
+      - name: fuzz smoke
+        run: |
+          set -e
+          for pkg_tgt in \
+            internal/worker:FuzzConsumeRedis internal/worker:FuzzConsumePostgres \
+            internal/worker:FuzzConsumeAMQP internal/worker:FuzzConsumeStream \
+            internal/hub:FuzzCompileFilter; do
+            pkg="${pkg_tgt%%:*}"; tgt="${pkg_tgt##*:}"
+            echo "=== fuzz $tgt ($pkg) ==="
+            go test -run='^$' -fuzz="^${tgt}$" -fuzztime=15s "./${pkg}/"
+          done
+
   ui:
     name: UI build
     runs-on: ubuntu-latest

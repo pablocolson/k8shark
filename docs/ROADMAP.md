@@ -200,13 +200,59 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   build`/`go test ./...` ; côté UI : `tsc -b`/`vitest run` (93 tests)/`npm
   run build`, tous propres.
 
+**Backlog, lot 3 — verrouillage tests/qualité, 4 items traités :**
+
+- **TST-2** : test d'intégration bout-en-bout worker → hub → front sur de
+  vrais WebSockets (`internal/hub/e2e_test.go`). `Server.handler()` extrait de
+  `Run` pour monter l'arbre de routes réel (WS compris) sur un
+  `httptest.Server` sans binder de port. Le test connecte un faux worker
+  (`/ws/worker`, `MsgHello`), pousse des entries, connecte un faux front
+  (`/ws?filter=`) et vérifie : filtrage côté serveur (seules les entries http
+  sont diffusées, jamais la redis), snapshot REST `/api/entries` (filtré et
+  non filtré), registre `/api/workers`, et le round-trip de commande
+  hub → worker (`POST /api/workers/capture` → `MsgWorkerCommand` reçu). Auth
+  activée pour couvrir les deux chemins de token (header Bearer côté worker,
+  `?token=` côté front navigateur) plus un test de rejet 401.
+- **TST-6** : couverture du protocole MCP (`internal/mcp/protocol_test.go`) —
+  routage des méthodes (`ping`/`tools/list`/méthode inconnue → `-32601`),
+  taxonomie des erreurs d'outil (outil inconnu, params invalides, argument
+  requis manquant, hub injoignable, hub 401 — tous en résultat `isError:true`,
+  jamais en erreur protocolaire), propagation du token hub en `Bearer`,
+  coercition d'arguments (`argInt` : float64/int/json.Number/string), et
+  l'invariant stdout-JSON-RPC-seulement exigé par CLAUDE.md (chaque ligne
+  écrite est une réponse valide avec id ; notification/ligne malformée/vide
+  n'en produisent aucune). Note : la ligne JSON malformée est aujourd'hui
+  silencieusement ignorée (pas de `-32700`) — comportement documenté par le
+  test, correctif laissé à MCP-6.
+- **TST-3** : fuzzing natif Go (`internal/worker/fuzz_test.go`,
+  `internal/hub/fuzz_test.go`). `FuzzConsumeRedis/Postgres/AMQP/Stream`
+  (bytes → dissecteur, sink non bloquant) et `FuzzCompileFilter` (compile +
+  évalue sur une entrée peuplée), corpus seedés avec les vrais octets/filtres
+  des tests existants. Aucune panique après campagne active (~130k–1M execs
+  par cible). Note : la chute du débit d'exécution sur les cibles Postgres/
+  Redis confirme les allocations non bornées de 64 MiB par frame (finding
+  SEC-8, distinct).
+- **TST-7** : benchmarks des chemins chauds (`internal/hub/bench_test.go`,
+  `internal/worker/bench_test.go`) — `BenchmarkCompileFilter`/`Predicate`/
+  `StoreAdd`/`Broadcast` (1/10/50 clients) côté hub, `BenchmarkConsumeHTTP/
+  Redis/Postgres` côté worker, tous avec `b.ReportAllocs`. Surfacent déjà du
+  signal : ~5 allocations par entrée × client sur `Predicate`, 253
+  allocations/op en fan-out à 50 clients (matière pour HUB-4 batching et
+  HUB-10 getters précalculés).
+
+  Outillage : cibles `make bench` et `make fuzz` (`FUZZTIME` paramétrable),
+  plus une étape CI « fuzz smoke » (15 s par cible) après `go test -race` — les
+  corpus seed tournent déjà à chaque `go test`. Vérifié au 2026-07-20 :
+  `gofmt`/`go vet`/`go build`/`go test -race ./...` (222 tests) propres,
+  campagnes de fuzzing sans crash, `make bench`/`make fuzz` fonctionnels.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/6/7/8/9, TST-2/3/5/6/7/8,
+UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/6/7/8/9, TST-5/8,
 EXT-2/3/4/5.
-Prochain chantier logique : d'autres items S/M de ce backlog, ou le démarrage
-de la **Phase 3** (gros chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls,
-HUB-1 persistance, EXT-1 tap targeting, OPS-2/OPS-3 release automatisée +
-arm64 — voir plus bas).
+Prochain chantier logique : d'autres items S/M de ce backlog (le lot sécurité
+SEC-6/8/9 reste le plus tranchant), ou le démarrage de la **Phase 3** (gros
+chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
+tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 
 ## Phases proposées
 

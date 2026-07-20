@@ -15,7 +15,7 @@ ifeq ($(GOOS),darwin)
 LDFLAGS := -linkmode=external $(LDFLAGS)
 endif
 
-.PHONY: all build ui sign run-hub run-worker dev clean docker-build docker-push docker-buildx helm-lint tidy test test-ui gen
+.PHONY: all build ui sign run-hub run-worker dev clean docker-build docker-push docker-buildx helm-lint tidy test test-ui bench fuzz gen
 
 all: ui build
 
@@ -62,6 +62,25 @@ test:
 ## run the front-end unit tests (vitest)
 test-ui:
 	cd ui && npm ci --no-audit --no-fund && npm test
+
+## run the Go benchmarks for the hot paths (hub fan-out/ingest/filter, dissectors)
+bench:
+	GOFLAGS=-mod=mod GOTOOLCHAIN=local go test -run='^$$' -bench=. -benchmem \
+		$(if $(filter darwin,$(GOOS)),-ldflags='-linkmode=external',) ./internal/hub/ ./internal/worker/
+
+## fuzz the dissectors and the IFL parser (FUZZTIME per target, default 30s).
+## `make test` already runs each fuzz target's seed corpus; this explores further.
+FUZZTIME ?= 30s
+fuzz:
+	@for pkg_tgt in \
+		internal/worker:FuzzConsumeRedis internal/worker:FuzzConsumePostgres \
+		internal/worker:FuzzConsumeAMQP internal/worker:FuzzConsumeStream \
+		internal/hub:FuzzCompileFilter; do \
+		pkg=$${pkg_tgt%%:*}; tgt=$${pkg_tgt##*:}; \
+		echo "=== fuzz $$tgt ($$pkg) ==="; \
+		GOFLAGS=-mod=mod GOTOOLCHAIN=local go test -run='^$$' -fuzz="^$$tgt$$" -fuzztime=$(FUZZTIME) \
+			$(if $(filter darwin,$(GOOS)),-ldflags='-linkmode=external',) ./$$pkg/ || exit 1; \
+	done
 
 helm-lint:
 	helm lint helm/k8shark
