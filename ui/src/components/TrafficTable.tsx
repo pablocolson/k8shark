@@ -136,6 +136,9 @@ export const TrafficTable = memo(function TrafficTable({
 }: Props) {
   const [visible, setVisible] = useState<Set<string>>(loadVisibleColumns);
   const [sort, setSort] = useState<SortState | null>(null);
+  // UI-8: snapshot of the buffer taken when a sort turns on — see the comment
+  // above sortedFrozen for why the stream is frozen while sorting.
+  const [frozenBase, setFrozenBase] = useState<Entry[] | null>(null);
 
   useEffect(() => {
     localStorage.setItem(VISIBLE_COLUMNS_KEY, JSON.stringify([...visible]));
@@ -161,12 +164,48 @@ export const TrafficTable = memo(function TrafficTable({
 
   const columns = useMemo(() => ALL_COLUMNS.filter((c) => visible.has(c.key)), [visible]);
 
-  const displayEntries = useMemo(() => {
-    if (!sort) return entries;
-    const copy = entries.slice();
+  // UI-8: re-sorting the whole buffer on every rAF flush is O(n log n) per
+  // frame, and n is unbounded once "load older" has grown the buffer. Plain
+  // memoization can't tame it: live streaming hands us a brand-new `entries`
+  // array (newest prepended) every single frame, so the sort's input changes
+  // every frame regardless of what the memo is keyed on. Instead we freeze the
+  // stream while a sort is active — snapshot the buffer the instant the sort
+  // turns on and sort *that* once; live arrivals keep flowing into `entries`
+  // but aren't merged into the sorted view until the user syncs (banner) or
+  // clears the sort. frozenBase is derived during render (React's "adjust state
+  // when a prop/state changes" pattern) so it stays in lockstep with `sort`
+  // within a single render: set the moment sort becomes truthy, cleared the
+  // moment it's null.
+  if (sort && frozenBase === null) setFrozenBase(entries);
+  else if (!sort && frozenBase !== null) setFrozenBase(null);
+
+  // Keyed on [sort, frozenBase] — deliberately NOT on `entries` — so a live
+  // flush (new `entries` ref every frame) never re-triggers the sort. It runs
+  // once per freeze, and again only when the sort key/dir changes or the
+  // snapshot is refreshed via syncFrozen.
+  const sortedFrozen = useMemo(() => {
+    if (!sort || !frozenBase) return null;
+    const copy = frozenBase.slice();
     copy.sort((a, b) => compareEntries(a, b, sort.key) * (sort.dir === "asc" ? 1 : -1));
     return copy;
-  }, [entries, sort]);
+  }, [sort, frozenBase]);
+
+  const displayEntries = sortedFrozen ?? entries;
+
+  // How many live entries have streamed in above the frozen snapshot (surfaced
+  // in the "stream frozen" banner). The snapshot's old top sits exactly after
+  // the freshly-prepended entries, so findIndex scans only the new ones —
+  // O(new), not O(n).
+  const frozenNewCount = useMemo(() => {
+    if (!frozenBase) return 0;
+    const topId = frozenBase[0]?.id;
+    if (!topId) return entries.length;
+    const idx = entries.findIndex((e) => e.id === topId);
+    return idx === -1 ? entries.length : idx;
+  }, [entries, frozenBase]);
+
+  // Merge the live buffer into the frozen view and re-sort it (banner click).
+  const syncFrozen = () => setFrozenBase(entries);
 
   // Real DOM windowing: only rows actually in (or near) the viewport get
   // mounted, unlike the old content-visibility:auto trick which still kept
@@ -274,6 +313,11 @@ export const TrafficTable = memo(function TrafficTable({
       {!sort && newCount > 0 && (
         <button type="button" className="new-entries-pill" onClick={scrollToTop}>
           ↑ {newCount} new {newCount === 1 ? "entry" : "entries"}
+        </button>
+      )}
+      {sort && (
+        <button type="button" className="new-entries-pill" onClick={syncFrozen}>
+          sort active — stream frozen{frozenNewCount > 0 ? `, ${frozenNewCount} new` : ""} · click to sync
         </button>
       )}
       <div

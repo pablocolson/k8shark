@@ -280,4 +280,90 @@ describe("TrafficTable", () => {
       expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
     });
   });
+
+  // UI-8: with a column sort active, the old code copied and re-sorted the
+  // whole buffer on every rAF flush. The fix freezes the stream while sorting
+  // (snapshot sorted once) so live arrivals don't re-trigger the sort — proven
+  // here by asserting the displayed order stays put as new entries stream in.
+  describe("sort freeze under live streaming (UI-8)", () => {
+    const summaries = () => Array.from(document.querySelectorAll("td.col-summary")).map((td) => td.textContent);
+    const bySpeed = () => [
+      entry({ id: "slow", elapsedMs: 300, request: { summary: "slow" } }),
+      entry({ id: "fast", elapsedMs: 10, request: { summary: "fast" } }),
+      entry({ id: "mid", elapsedMs: 100, request: { summary: "mid" } }),
+    ];
+
+    it("keeps the sorted order stable across a re-render that does not change entries", async () => {
+      const user = userEvent.setup();
+      const entries = bySpeed();
+      const { rerender } = render(<TrafficTable {...baseProps} entries={entries} />);
+
+      await user.click(screen.getByText("latency"));
+      expect(summaries()).toEqual(["fast", "mid", "slow"]);
+
+      // A re-render driven by an unrelated prop (same entries identity) must not
+      // reorder — the sort is memoized, not recomputed on every render.
+      rerender(<TrafficTable {...baseProps} entries={entries} loadingOlder={true} />);
+      expect(summaries()).toEqual(["fast", "mid", "slow"]);
+    });
+
+    it("freezes the sorted view when new entries stream in, and shows a frozen banner", async () => {
+      const user = userEvent.setup();
+      const initial = bySpeed();
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+
+      await user.click(screen.getByText("latency")); // asc: fast, mid, slow
+      expect(summaries()).toEqual(["fast", "mid", "slow"]);
+
+      // Live flush prepends a brand-new fastest entry. Frozen while sorting, the
+      // displayed order must NOT change (no re-sort) and the banner counts it.
+      const withNew = [entry({ id: "zippy", elapsedMs: 1, request: { summary: "zippy" } }), ...initial];
+      rerender(<TrafficTable {...baseProps} entries={withNew} />);
+
+      expect(summaries()).toEqual(["fast", "mid", "slow"]); // unchanged — frozen
+      expect(screen.getByRole("button", { name: /stream frozen/i })).toHaveTextContent(/1 new/);
+    });
+
+    it("syncing the frozen snapshot pulls in and re-sorts the new entries", async () => {
+      const user = userEvent.setup();
+      const initial = bySpeed();
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+
+      await user.click(screen.getByText("latency"));
+      const withNew = [entry({ id: "zippy", elapsedMs: 1, request: { summary: "zippy" } }), ...initial];
+      rerender(<TrafficTable {...baseProps} entries={withNew} />);
+      expect(summaries()).toEqual(["fast", "mid", "slow"]); // still frozen
+
+      await user.click(screen.getByRole("button", { name: /stream frozen/i }));
+      expect(summaries()).toEqual(["zippy", "fast", "mid", "slow"]); // merged + re-sorted asc
+    });
+
+    it("clearing the sort resumes the live order including entries that arrived while frozen", async () => {
+      const user = userEvent.setup();
+      const initial = bySpeed();
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+
+      const latencyHeader = screen.getByText("latency");
+      await user.click(latencyHeader); // asc
+      const withNew = [entry({ id: "zippy", elapsedMs: 1, request: { summary: "zippy" } }), ...initial];
+      rerender(<TrafficTable {...baseProps} entries={withNew} />);
+
+      await user.click(latencyHeader); // desc
+      await user.click(latencyHeader); // reset — unfreeze
+      // Back to arrival order of the *current* live buffer, banner gone.
+      expect(summaries()).toEqual(["zippy", "slow", "fast", "mid"]);
+      expect(screen.queryByRole("button", { name: /stream frozen/i })).not.toBeInTheDocument();
+    });
+  });
+
+  // Loosely covers the App-side selectedLive fix (UI-8): the table must stay
+  // correct with a large buffer. App.tsx's O(1) Map lookup isn't reachable from
+  // this component test file, but selection-by-id at scale is.
+  it("selects the right row by id in a large entries buffer", () => {
+    const big = Array.from({ length: 5000 }, (_, i) => entry({ id: `e${i}`, request: { summary: `sum-${i}` } }));
+    render(<TrafficTable {...baseProps} entries={big} selectedId="e0" />);
+    const selected = document.querySelector("tr.row.sel");
+    expect(selected).not.toBeNull();
+    expect(selected).toHaveTextContent("sum-0");
+  });
 });

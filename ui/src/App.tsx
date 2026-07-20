@@ -128,10 +128,20 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [paused, setPaused]);
 
+  // Index the live buffer by id once per change so the selected-entry lookup
+  // below is O(1) instead of an entries.find() linear scan on every render —
+  // the buffer can hold 10k+ entries and hub.entries gets a fresh identity on
+  // every rAF flush, so the scan otherwise re-ran each frame (UI-8).
+  const entriesById = useMemo(() => {
+    const byId = new Map<string, Entry>();
+    for (const e of hub.entries) byId.set(e.id, e);
+    return byId;
+  }, [hub.entries]);
+
   // Keep the selected entry object in sync with the freshest list reference.
   const selectedLive = useMemo(
-    () => (selected ? hub.entries.find((e) => e.id === selected.id) ?? selected : null),
-    [selected, hub.entries]
+    () => (selected ? entriesById.get(selected.id) ?? selected : null),
+    [selected, entriesById]
   );
 
   const pinnedIds = useMemo(() => new Set(pinned.map((p) => p.id)), [pinned]);
