@@ -105,9 +105,10 @@ func New(log *slog.Logger, opts Options) *Server {
 	}
 }
 
-// Run serves until ctx is cancelled (e.g. SIGINT/SIGTERM), then drains
-// in-flight requests via a bounded graceful shutdown.
-func (s *Server) Run(ctx context.Context, addr string) error {
+// handler builds the fully-wrapped HTTP handler (route mux + auth + CORS) the
+// hub serves. Split out of Run so tests can mount the real route tree — WS
+// endpoints included — on an httptest.Server without binding a port.
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/worker", s.handleWorker)
 	mux.HandleFunc("/ws", s.handleFront)
@@ -129,14 +130,19 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	if s.uiDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.uiDir)))
 	}
+	return withCORS(s.withAuth(mux))
+}
 
+// Run serves until ctx is cancelled (e.g. SIGINT/SIGTERM), then drains
+// in-flight requests via a bounded graceful shutdown.
+func (s *Server) Run(ctx context.Context, addr string) error {
 	go s.statsLoop(ctx)
 	go s.resolver.run(ctx)
 
 	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           withCORS(s.withAuth(mux)),
+		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
