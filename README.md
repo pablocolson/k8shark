@@ -192,9 +192,9 @@ itself if you need broader protocol support or its managed offering.
 
 ## Contributing
 
-Issues and PRs welcome. `CLAUDE.md` documents the architecture and
-conventions in more depth if you're extending a dissector or the filter
-language.
+Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). `CLAUDE.md`
+documents the architecture and conventions in more depth if you're extending a
+dissector or the filter language.
 
 ## License
 

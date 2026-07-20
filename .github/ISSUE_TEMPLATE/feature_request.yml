@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The use case or pain point — not just the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like k8shark to do. Sketch the CLI flag / API / UI if relevant.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New protocol dissector
+        - Capture (AF_PACKET / eBPF)
+        - Filter language (IFL)
+        - Dashboard / UX
+        - MCP tooling
+        - Deployment / ops
+        - other
+    validations:
+      required: true

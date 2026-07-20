@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Go modules (root go.mod).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  # Front-end npm dependencies (ui/package.json).
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    groups:
+      ui-deps:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  # GitHub Actions used by the CI workflow.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

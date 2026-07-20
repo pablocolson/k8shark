@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in k8shark is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - worker (capture / dissection)
+        - hub (API / filter / enrichment)
+        - front (dashboard)
+        - CLI (tap / clean / proxy / console)
+        - mcp (MCP server)
+        - Helm chart / deploy
+        - other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `k8shark version` (or the image tag / commit).
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes distro & version, CNI, node OS/arch, and whether eBPF TLS capture is enabled.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Worker/hub logs around the problem. Redact anything sensitive.
+      render: shell
+    validations:
+      required: false
