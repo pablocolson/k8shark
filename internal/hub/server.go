@@ -166,6 +166,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/summary", s.handleSummary)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/graph", s.handleGraph)
+	mux.HandleFunc("/api/pcap", s.handlePcap)
 	mux.HandleFunc("/api/workers", s.handleWorkers)
 	mux.HandleFunc("/api/workers/capture", s.handleWorkerCapture)
 	mux.HandleFunc("/api/fields", s.handleFields)

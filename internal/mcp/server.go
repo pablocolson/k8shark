@@ -55,7 +55,8 @@ type tool struct {
 	description string
 	inputSchema map[string]any
 	handler     func(ctx context.Context, args map[string]any) (string, error)
-	// mutating marks a tool that changes state (currently only start_pcap);
+	// mutating marks a tool with a side effect beyond reading the hub
+	// (currently only the PCAP export tool, which writes a local file);
 	// everything else only reads from the hub. Surfaced as
 	// annotations.readOnlyHint so MCP clients can auto-approve read-only
 	// calls without a confirmation prompt.
@@ -63,9 +64,9 @@ type tool struct {
 }
 
 // New builds an MCP server that talks to the hub at hubURL, authenticating
-// with hubToken when non-empty. When allowCapture is true the (placeholder)
-// PCAP capture tool is registered as well. log must write to stderr — stdout
-// is the protocol channel.
+// with hubToken when non-empty. When allowCapture is true the PCAP export tool
+// (which writes a local .pcap file, the one mutating tool) is registered as
+// well. log must write to stderr — stdout is the protocol channel.
 func New(hubURL, hubToken string, allowCapture bool, log *slog.Logger) *Server {
 	s := &Server{
 		hubURL:       strings.TrimRight(hubURL, "/"),
@@ -282,7 +283,18 @@ func capText(s string) string {
 		"a smaller limit, or page with before_seq]", cut, len(cut), len(s))
 }
 
+// toolAliases maps alternate tool names to their canonical registered name, so
+// a client calling a preferred/renamed spelling still resolves. The PCAP export
+// tool is advertised as start_pcap but is really an export; export_pcap is
+// accepted for callers that use the clearer name.
+var toolAliases = map[string]string{
+	"export_pcap": "start_pcap",
+}
+
 func (s *Server) lookup(name string) *tool {
+	if canonical, ok := toolAliases[name]; ok {
+		name = canonical
+	}
 	for _, t := range s.tools {
 		if t.name == name {
 			return t
@@ -538,18 +550,29 @@ func (s *Server) registerTools() {
 		},
 	}
 	if s.allowCapture {
+		// Advertised as start_pcap for backward compatibility; export_pcap is
+		// accepted as an alias (see lookup). It no longer starts a live capture
+		// — it exports the hub's buffered traffic to a local .pcap file, the one
+		// tool with a side effect (writing that file), hence mutating.
 		s.tools = append(s.tools, &tool{
-			name:        "start_pcap",
-			description: "Start a per-namespace PCAP capture. Placeholder: the capture backend is still in design and this tool does not yet capture anything.",
+			name: "start_pcap",
+			description: "Export the hub's buffered traffic to a local PCAP file and return its path, ready to " +
+				"open in Wireshark/tshark. Each captured L7 entry becomes a synthesized request/response pair " +
+				"(real endpoints and, when known, real L4 metadata, but reconstructed headers — not a wire " +
+				"capture). Optionally scope with an IFL filter and/or a time window. Also callable as export_pcap.",
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"namespace":       map[string]any{"type": "string", "description": "Namespace to capture (optional)."},
-					"filter":          map[string]any{"type": "string", "description": "IFL filter to scope the capture (optional)."},
-					"durationSeconds": map[string]any{"type": "number", "description": "Capture duration in seconds (optional)."},
+					"filter": map[string]any{"type": "string", "description": filterDesc},
+					"since":  sinceProp,
+					"until":  untilProp,
+					"limit": map[string]any{
+						"type":        "number",
+						"description": "Maximum entries to include (default: the whole buffer, newest kept).",
+					},
 				},
 			},
-			handler:  s.handleStartPcap,
+			handler:  s.handleExportPcap,
 			mutating: true,
 		})
 	}
@@ -747,9 +770,46 @@ func (s *Server) handleListWorkloads(ctx context.Context, _ map[string]any) (str
 	return s.getPretty(ctx, "/api/summary?groupBy=workload&limit=200", "workloads")
 }
 
-func (s *Server) handleStartPcap(_ context.Context, _ map[string]any) (string, error) {
-	return "PCAP capture is not yet available — the capture backend is still in design. " +
-		"This tool is a wired placeholder; it will trigger real per-namespace PCAP captures once the backend lands.", nil
+// handleExportPcap fetches the hub's GET /api/pcap (which synthesizes a classic
+// .pcap from the buffered entries, honoring the same filter/since/until as the
+// other read tools), writes it to a temp file, and returns the path plus a
+// one-line Wireshark/tshark hint. This is the one tool with a local side effect
+// (the written file); the hub stays read-only.
+func (s *Server) handleExportPcap(ctx context.Context, args map[string]any) (string, error) {
+	q := url.Values{}
+	if f := argString(args, "filter"); f != "" {
+		q.Set("filter", f)
+	}
+	setTimeArgs(q, args)
+	if l := argInt(args, "limit", 0); l > 0 {
+		q.Set("limit", strconv.Itoa(l))
+	}
+	path := "/api/pcap"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	body, status, err := s.get(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("hub returned %d: %s", status, strings.TrimSpace(string(body)))
+	}
+
+	f, err := os.CreateTemp("", "k8shark-*.pcap")
+	if err != nil {
+		return "", fmt.Errorf("creating pcap file: %w", err)
+	}
+	name := f.Name()
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("writing pcap file %s: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("closing pcap file %s: %w", name, err)
+	}
+	return fmt.Sprintf("Exported %d bytes of synthesized PCAP to %s\n"+
+		"Open it in Wireshark, or: tshark -r %s", len(body), name, name), nil
 }
 
 // --- hub HTTP helpers ------------------------------------------------------

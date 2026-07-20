@@ -54,7 +54,7 @@ func mcpCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&hubURL, "hub", "http://localhost:8898", "hub base URL")
 	cmd.Flags().StringVar(&hubToken, "hub-token", "", "bearer token for the hub API (default $K8SHARK_API_TOKEN)")
-	cmd.Flags().BoolVar(&allowCapture, "allow-capture", false, "register the (placeholder) PCAP capture tool")
+	cmd.Flags().BoolVar(&allowCapture, "allow-capture", false, "register the PCAP export tool (export_pcap / start_pcap), which writes buffered traffic to a local .pcap file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print a ready-to-paste MCP client config block (.mcp.json shape) and exit")
 	return cmd
 }
