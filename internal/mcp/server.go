@@ -35,7 +35,8 @@ const serverInstructions = "Start with get_stats or get_traffic_summary for the 
 	"rejected, not silently ignored). Use list_entries to dig into a specific slice once you know what " +
 	"you're looking for, and get_entry for one entry's full detail (headers, bodies, timings). " +
 	"find_error_clusters and diff_traffic answer \"what's failing\" and \"what changed\" directly, without " +
-	"needing to page through entries yourself."
+	"needing to page through entries yourself; get_service_graph maps who calls whom when you need the " +
+	"dependency chain around a service."
 
 // Server exposes the hub REST API to an AI agent over MCP/stdio.
 type Server struct {
@@ -416,6 +417,29 @@ func (s *Server) registerTools() {
 			handler: s.handleTrafficSummary,
 		},
 		{
+			name: "get_service_graph",
+			description: "Get the service dependency graph from buffered traffic: one directed src→dst edge per " +
+				"workload pair (falling back to pod/service name, then IP) with call count, error/warning counts and " +
+				"latency percentiles (p50/p95/max), busiest edges first. Use it to walk the call chain around an " +
+				"incident — who calls the failing service, and what does it call downstream — before assigning blame " +
+				"to a single hop. Pass focus to restrict to edges touching one service.",
+			inputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"filter": map[string]any{"type": "string", "description": filterDesc},
+					"since":  sinceProp,
+					"until":  untilProp,
+					"focus": map[string]any{
+						"type": "string",
+						"description": "Restrict to edges where one endpoint is this service, matched exactly " +
+							"against its workload, pod/service name, or namespace-qualified label (e.g. \"checkout\" " +
+							"or \"shop/checkout\").",
+					},
+				},
+			},
+			handler: s.handleGetServiceGraph,
+		},
+		{
 			name: "diff_traffic",
 			description: "Compare traffic between two time windows per group (e.g. a baseline \"before\" period vs " +
 				"a \"during/after\" period around an incident): volume, error-rate and p95 latency deltas, sorted by " +
@@ -645,6 +669,20 @@ func (s *Server) handleTrafficSummary(ctx context.Context, args map[string]any) 
 	limit := argInt(args, "limit", 25)
 	q.Set("limit", strconv.Itoa(limit))
 	return s.getPretty(ctx, "/api/summary?"+q.Encode(), "summary")
+}
+
+// handleGetServiceGraph proxies /api/graph: the directed src→dst call-graph
+// edges with per-edge counts and latency percentiles, aggregated hub-side.
+func (s *Server) handleGetServiceGraph(ctx context.Context, args map[string]any) (string, error) {
+	q := url.Values{}
+	if f := argString(args, "filter"); f != "" {
+		q.Set("filter", f)
+	}
+	setTimeArgs(q, args)
+	if f := argString(args, "focus"); f != "" {
+		q.Set("focus", f)
+	}
+	return s.getPretty(ctx, "/api/graph?"+q.Encode(), "graph")
 }
 
 // handleTimeline proxies /api/timeline: zero-filled per-bucket entry/error

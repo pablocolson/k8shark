@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,7 @@ const (
 	redisPort = 6379
 	pgPort    = 5432
 	amqpPort  = 5672
+	dnsPort   = 53
 )
 
 // pipeline turns reassembled TCP streams and UDP datagrams into paired L7
@@ -306,6 +308,8 @@ func (p *pipeline) consumeStreamID(c connID, r io.Reader) {
 	switch {
 	case dst == pgPort || src == pgPort:
 		p.consumePostgresID(c, r, dst == pgPort)
+	case dst == dnsPort || src == dnsPort:
+		p.consumeDNSTCPID(c, r, dst == dnsPort)
 	default:
 		// No well-known port matched (Redis/Postgres/AMQP remapped onto a
 		// non-standard port is common with k8s Services): content-sniff
@@ -434,28 +438,47 @@ type dnsPending struct {
 func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers.DNS, raw []byte) {
 	srcIP, dstIP := netFlow.Src().String(), netFlow.Dst().String()
 	if !dns.QR {
-		// Query
-		q := ""
-		if len(dns.Questions) > 0 {
-			q = string(dns.Questions[0].Name)
-		}
-		p.mu.Lock()
-		p.dns[dnsKey(srcIP, dns.ID)] = &dnsPending{
-			question:  q,
-			questions: dnsQuestions(dns.Questions),
-			id:        int(dns.ID),
-			src:       api.Endpoint{IP: srcIP, Port: int(udp.SrcPort)},
-			dst:       api.Endpoint{IP: dstIP, Port: int(udp.DstPort), Name: "dns"},
-			ts:        time.Now(),
-			raw:       rawViewFromBytes(raw, p.rawCap),
-		}
-		p.mu.Unlock()
+		// Query: the sender is the client.
+		p.dnsQuery(
+			api.Endpoint{IP: srcIP, Port: int(udp.SrcPort)},
+			api.Endpoint{IP: dstIP, Port: int(udp.DstPort), Name: "dns"},
+			dns, raw)
 		return
 	}
-	// Response: pair with the pending query (client is now the destination).
+	// Response: the client is now the destination.
+	p.dnsResponse(dstIP, int(udp.DstPort), dns, raw)
+}
+
+// dnsQuery records a query awaiting its response, keyed by the client
+// endpoint plus the message ID. Shared by the UDP packet path (handleDNS)
+// and the TCP stream path (consumeDNSTCPID) so both transports pair through
+// the same pending map.
+func (p *pipeline) dnsQuery(client, server api.Endpoint, dns *layers.DNS, raw []byte) {
+	q := ""
+	if len(dns.Questions) > 0 {
+		q = string(dns.Questions[0].Name)
+	}
 	p.mu.Lock()
-	pend := p.dns[dnsKey(dstIP, dns.ID)]
-	delete(p.dns, dnsKey(dstIP, dns.ID))
+	p.dns[dnsKey(client.IP, client.Port, dns.ID)] = &dnsPending{
+		question:  q,
+		questions: dnsQuestions(dns.Questions),
+		id:        int(dns.ID),
+		src:       client,
+		dst:       server,
+		ts:        time.Now(),
+		raw:       rawViewFromBytes(raw, p.rawCap),
+	}
+	p.mu.Unlock()
+}
+
+// dnsResponse pairs a response with its pending query (looked up by the
+// client endpoint the response is headed to, plus the message ID) and emits
+// the finished entry.
+func (p *pipeline) dnsResponse(clientIP string, clientPort int, dns *layers.DNS, raw []byte) {
+	key := dnsKey(clientIP, clientPort, dns.ID)
+	p.mu.Lock()
+	pend := p.dns[key]
+	delete(p.dns, key)
 	p.mu.Unlock()
 	if pend == nil {
 		return
@@ -490,6 +513,59 @@ func (p *pipeline) handleDNS(netFlow gopacket.Flow, udp *layers.UDP, dns *layers
 		Response:    api.Payload{Answer: answer, Summary: dnsRcode(dns.ResponseCode), DNS: respDetail, Raw: rawViewFromBytes(raw, p.rawCap)},
 		Status:      dnsStatus(dns.ResponseCode),
 	})
+}
+
+// --- DNS over TCP -----------------------------------------------------------
+
+// consumeDNSTCPID dissects one direction of a TCP port-53 connection.
+// Resolvers retry over TCP whenever a UDP answer is truncated (TC bit), which
+// large records (SVCB/HTTPS, DNSSEC) make common. Framing (RFC 1035 §4.2.2)
+// is a 2-byte big-endian length prefix per message — inherently bounded at
+// 64KiB — each carrying a standard DNS payload. Decoded messages feed the
+// same pending map as UDP (dnsQuery/dnsResponse), so TCP queries and answers
+// pair, and entries are tagged, exactly like UDP ones. isRequest means
+// client -> server (queries); the server -> client direction carries answers.
+func (p *pipeline) consumeDNSTCPID(c connID, r io.Reader, isRequest bool) {
+	// On the client -> server direction src is the client; flipped otherwise.
+	cli, srv := c.endpoints()
+	if !isRequest {
+		srv, cli = cli, srv
+	}
+	srv.Name = "dns"
+
+	marked := false
+	var lenBuf [2]byte
+	for {
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			io.Copy(io.Discard, r)
+			return
+		}
+		n := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if n == 0 {
+			// A zero-length frame is never valid DNS; the framing is broken.
+			io.Copy(io.Discard, r)
+			return
+		}
+		msg := make([]byte, n)
+		if _, err := io.ReadFull(r, msg); err != nil {
+			return // stream ended mid-message
+		}
+		var dns layers.DNS
+		if err := dns.DecodeFromBytes(msg, gopacket.NilDecodeFeedback); err != nil {
+			io.Copy(io.Discard, r)
+			return // not DNS after all — drop the rest of this direction
+		}
+		if !marked {
+			// L7-dissected: don't also emit a generic L4 flow for this conn.
+			p.markL7(c.key())
+			marked = true
+		}
+		if !dns.QR {
+			p.dnsQuery(cli, srv, &dns, msg)
+			continue
+		}
+		p.dnsResponse(cli.IP, cli.Port, &dns, msg)
+	}
 }
 
 // gc drops stale pending state so a lossy capture can't leak memory.
@@ -538,8 +614,11 @@ func flowEndpoints(netFlow, transport gopacket.Flow) (src, dst api.Endpoint) {
 	return
 }
 
-func dnsKey(clientIP string, id uint16) string {
-	return clientIP + "/" + strconv.Itoa(int(id))
+// dnsKey keys a pending query by the client's source IP *and port* plus the
+// message ID: on ID+IP alone, two concurrent queries from the same IP
+// (hostNetwork pods, SNAT) with colliding IDs would mispair.
+func dnsKey(clientIP string, clientPort int, id uint16) string {
+	return clientIP + ":" + strconv.Itoa(clientPort) + "/" + strconv.Itoa(int(id))
 }
 
 func portOf(s string) int {

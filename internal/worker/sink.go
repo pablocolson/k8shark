@@ -67,6 +67,11 @@ type sink struct {
 	// set directly by the pipeline via p.sink.flowsEvicted.
 	flowsEvicted atomic.Uint64
 
+	// tlsLagDrops counts eBPF TLS streams abandoned because backpressure
+	// dropped one of their interior chunks (see ebpf.TLSRecord.Lagged) —
+	// closed with a clean truncation instead of misparsing past a hole.
+	tlsLagDrops atomic.Uint64
+
 	mu   sync.Mutex
 	conn *websocket.Conn
 }
@@ -234,6 +239,7 @@ func (s *sink) pump(ctx context.Context) {
 				RingPackets:   s.ringPackets.Load(),
 				RingDrops:     s.ringDrops.Load(),
 				FlowsEvicted:  s.flowsEvicted.Load(),
+				TLSLagDrops:   s.tlsLagDrops.Load(),
 			}})
 			if err != nil {
 				continue

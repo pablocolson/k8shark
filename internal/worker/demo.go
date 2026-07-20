@@ -30,17 +30,20 @@ var demoServices = []service{
 	{"coredns", "kube-system", "10.0.0.10"},
 }
 
-// amqpOps is the synthetic AMQP method set the demo cycles through.
+// amqpOps is the synthetic AMQP method set the demo cycles through. corrID and
+// replyTo are the Basic content-header properties (DIS-9), set on the RPC-style
+// publish/deliver so those filter fields are exercised in demo mode.
 var amqpOps = []struct {
 	class, method, summary, exchange, rk, queue, body, status string
 	tag                                                       uint64
+	corrID, replyTo                                           string
 }{
-	{"Basic", "Publish", "PUBLISH orders/new (512 B)", "orders", "new", "", `{"order":4821,"total":39.9}`, "success", 0},
-	{"Basic", "Deliver", "DELIVER orders/new tag=42", "orders", "new", "", `{"order":4821}`, "success", 42},
-	{"Queue", "Declare", "QUEUE.DECLARE payments", "", "", "payments", "", "success", 0},
-	{"Basic", "Ack", "ACK tag=42", "", "", "", "", "success", 42},
-	{"Basic", "Return", "RETURN 312 orders/lost", "orders", "lost", "", "", "error", 0},
-	{"Connection", "Close", "CONNECTION.CLOSE 320 CONNECTION_FORCED", "", "", "", "", "error", 0},
+	{"Basic", "Publish", "PUBLISH orders/new (512 B)", "orders", "new", "", `{"order":4821,"total":39.9}`, "success", 0, "req-4821", "amq.rabbitmq.reply-to"},
+	{"Basic", "Deliver", "DELIVER orders/new tag=42", "orders", "new", "", `{"order":4821}`, "success", 42, "req-4821", ""},
+	{"Queue", "Declare", "QUEUE.DECLARE payments", "", "", "payments", "", "success", 0, "", ""},
+	{"Basic", "Ack", "ACK tag=42", "", "", "", "", "success", 42, "", ""},
+	{"Basic", "Return", "RETURN 312 orders/lost", "orders", "lost", "", "", "error", 0, "", ""},
+	{"Connection", "Close", "CONNECTION.CLOSE 320 CONNECTION_FORCED", "", "", "", "", "error", 0, "", ""},
 }
 
 var httpPaths = []string{
@@ -188,11 +191,13 @@ func genEntry(rnd *rand.Rand, node string, seq int64) *api.Entry {
 		e.Request = api.Payload{
 			Class: op.class, Method: op.method,
 			Exchange: op.exchange, RoutingKey: op.rk, Queue: op.queue, DeliveryTag: op.tag,
+			CorrelationID: op.corrID, ReplyTo: op.replyTo,
 			Summary: op.summary,
 		}
 		if op.body != "" {
 			e.Request.Body = op.body
 			e.Request.Size = len(op.body)
+			e.Request.ContentType = "application/json"
 		}
 		e.Response = api.Payload{Summary: op.summary}
 		e.Status, e.StatusCode = op.status, 0

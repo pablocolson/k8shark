@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -632,6 +633,124 @@ func TestDNSNXDomainDetail(t *testing.T) {
 	}
 }
 
+// dnsWire serializes a DNS message to real wire bytes via gopacket.
+func dnsWire(t *testing.T, msg *layers.DNS) []byte {
+	t.Helper()
+	buf := gopacket.NewSerializeBuffer()
+	if err := msg.SerializeTo(buf, gopacket.SerializeOptions{FixLengths: true}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// dnsTCPFrame wraps a DNS message in RFC 1035 §4.2.2 TCP framing (2-byte
+// big-endian length prefix).
+func dnsTCPFrame(payload []byte) []byte {
+	b := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(b, uint16(len(payload)))
+	copy(b[2:], payload)
+	return b
+}
+
+// Two length-prefixed queries on the client direction plus their answers on
+// the server direction -> two correctly-paired entries, dispatched by the
+// port-53 case in consumeStreamID.
+func TestDNSOverTCPPairing(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	cli := connID{srcIP: "10.0.0.1", dstIP: "10.0.0.2", srcPort: 40200, dstPort: 53}
+	srv := connID{srcIP: "10.0.0.2", dstIP: "10.0.0.1", srcPort: 53, dstPort: 40200}
+
+	q1 := dnsWire(t, &layers.DNS{ID: 21, RD: true, Questions: []layers.DNSQuestion{{Name: []byte("a.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}})
+	q2 := dnsWire(t, &layers.DNS{ID: 22, RD: true, Questions: []layers.DNSQuestion{{Name: []byte("b.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}})
+	p.consumeStreamID(cli, bytes.NewReader(append(dnsTCPFrame(q1), dnsTCPFrame(q2)...)))
+
+	a1 := dnsWire(t, &layers.DNS{
+		ID: 21, QR: true, ResponseCode: layers.DNSResponseCodeNoErr,
+		Questions: []layers.DNSQuestion{{Name: []byte("a.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}},
+		Answers:   []layers.DNSResourceRecord{{Name: []byte("a.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN, TTL: 30, IP: net.IP{1, 2, 3, 4}}},
+	})
+	a2 := dnsWire(t, &layers.DNS{
+		ID: 22, QR: true, ResponseCode: layers.DNSResponseCodeNoErr,
+		Questions: []layers.DNSQuestion{{Name: []byte("b.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}},
+		Answers:   []layers.DNSResourceRecord{{Name: []byte("b.local"), Type: layers.DNSTypeA, Class: layers.DNSClassIN, TTL: 30, IP: net.IP{5, 6, 7, 8}}},
+	})
+	p.consumeStreamID(srv, bytes.NewReader(append(dnsTCPFrame(a1), dnsTCPFrame(a2)...)))
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	answers := map[string]string{}
+	for _, e := range got {
+		if e.Protocol != api.ProtocolDNS {
+			t.Errorf("protocol = %q, want dns", e.Protocol)
+		}
+		if e.Source.Port != 40200 || e.Destination.Port != 53 || e.Destination.Name != "dns" {
+			t.Errorf("endpoints = %+v -> %+v, want client:40200 -> dns:53", e.Source, e.Destination)
+		}
+		answers[e.Request.Question] = e.Response.Answer
+	}
+	if answers["a.local"] != "1.2.3.4" || answers["b.local"] != "5.6.7.8" {
+		t.Errorf("pairing = %v, want a.local->1.2.3.4 b.local->5.6.7.8", answers)
+	}
+}
+
+// Regression: two in-flight queries from the same IP with the same message ID
+// but different source ports must pair independently (hostNetwork pods and
+// SNAT make same-IP colliding IDs realistic) — the pending key includes the
+// client port, not just IP+ID.
+func TestDNSSameIDDistinctSourcePorts(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	reqNet, _, respNet, _ := flows(50002, 53)
+
+	mkQ := func(name string) *layers.DNS {
+		return &layers.DNS{ID: 99, Questions: []layers.DNSQuestion{{Name: []byte(name), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}}
+	}
+	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50002, DstPort: 53}, mkQ("one.local"), nil)
+	p.handleDNS(reqNet, &layers.UDP{SrcPort: 50003, DstPort: 53}, mkQ("two.local"), nil)
+
+	mkA := func(name string, ip net.IP) *layers.DNS {
+		return &layers.DNS{
+			ID: 99, QR: true, ResponseCode: layers.DNSResponseCodeNoErr,
+			Answers: []layers.DNSResourceRecord{{Name: []byte(name), Type: layers.DNSTypeA, TTL: 30, IP: ip}},
+		}
+	}
+	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50002}, mkA("one.local", net.IP{1, 1, 1, 1}), nil)
+	p.handleDNS(respNet, &layers.UDP{SrcPort: 53, DstPort: 50003}, mkA("two.local", net.IP{2, 2, 2, 2}), nil)
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 (same-ID queries must not collide)", len(got))
+	}
+	for _, e := range got {
+		want := map[string]string{"one.local": "1.1.1.1", "two.local": "2.2.2.2"}[e.Request.Question]
+		if e.Response.Answer != want {
+			t.Errorf("question %q paired with answer %q, want %q", e.Request.Question, e.Response.Answer, want)
+		}
+	}
+}
+
+// Broken TCP framing (short prefix, zero-length frame, prefix promising more
+// bytes than the stream holds) must not panic and must emit nothing.
+func TestDNSOverTCPTruncatedFrame(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	cli := connID{srcIP: "10.0.0.1", dstIP: "10.0.0.2", srcPort: 40201, dstPort: 53}
+
+	for _, stream := range [][]byte{
+		{0x01},                         // can't even read the length prefix
+		{0x00, 0x00, 0xde, 0xad},       // zero-length frame
+		{0x01, 0x2c, 0x00, 0x01, 0x02}, // prefix says 300 bytes, only 3 present
+	} {
+		p.consumeStreamID(cli, bytes.NewReader(stream))
+	}
+	if got := drain(s); len(got) != 0 {
+		t.Errorf("got %d entries from broken framing, want 0", len(got))
+	}
+}
+
 // --- WS5: AMQP (RabbitMQ 0-9-1) ---------------------------------------------
 
 func amqpFrame(ftype byte, channel uint16, payload []byte) []byte {
@@ -698,6 +817,102 @@ func TestAMQPBasicPublish(t *testing.T) {
 	}
 	if !strings.Contains(e.Request.Summary, "PUBLISH orders/new") {
 		t.Errorf("summary = %q", e.Request.Summary)
+	}
+}
+
+// TestAMQPBasicProperties (DIS-9): a Publish whose content header carries
+// content-type + a headers field-table (which must be SKIPPED to reach later
+// properties) + correlation-id + reply-to + message-id must surface those
+// three IDs and the content-type, proving the property list is walked in flag
+// order past the field-table.
+func TestAMQPBasicProperties(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, _, _ := flows(40120, amqpPort)
+
+	var args []byte
+	args = appendU16(args, 0)
+	args = append(args, amqpShortStrBytes("orders")...)
+	args = append(args, amqpShortStrBytes("new")...)
+	args = append(args, 0x00)
+	publish := amqpFrame(amqpFrameMethod, 1, amqpMethod(amqpClassBasic, 40, args))
+
+	// property flags: content-type|headers|correlation-id|reply-to|message-id
+	const flags = 0x8000 | 0x2000 | 0x0400 | 0x0200 | 0x0080
+	var props []byte
+	props = appendU16(props, flags)
+	props = append(props, amqpShortStrBytes("application/json")...) // content-type
+	// headers field table: one entry key="x" value shortstr("y"), must be skipped.
+	var table []byte
+	table = append(table, amqpShortStrBytes("x")...)
+	table = append(table, 'S')  // field type: long string
+	table = appendU32(table, 1) // string length
+	table = append(table, 'y')
+	props = appendU32(props, uint32(len(table)))
+	props = append(props, table...)
+	props = append(props, amqpShortStrBytes("corr-99")...)      // correlation-id
+	props = append(props, amqpShortStrBytes("amq.reply-to")...) // reply-to
+	props = append(props, amqpShortStrBytes("msg-7")...)        // message-id
+
+	var hdr []byte
+	hdr = appendU16(hdr, amqpClassBasic)
+	hdr = appendU16(hdr, 0)
+	hdr = append(hdr, 0, 0, 0, 0, 0, 0, 0, 2) // body-size = 2
+	hdr = append(hdr, props...)
+	header := amqpFrame(amqpFrameHeader, 1, hdr)
+	body := amqpFrame(amqpFrameBody, 1, []byte("hi"))
+
+	stream := amqpHeader + string(publish) + string(header) + string(body)
+	p.consumeStream(rNet, rTr, strings.NewReader(stream))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	r := got[0].Request
+	if r.ContentType != "application/json" {
+		t.Errorf("contentType = %q, want application/json", r.ContentType)
+	}
+	if r.CorrelationID != "corr-99" {
+		t.Errorf("correlationId = %q, want corr-99 (field table must be skipped)", r.CorrelationID)
+	}
+	if r.ReplyTo != "amq.reply-to" {
+		t.Errorf("replyTo = %q, want amq.reply-to", r.ReplyTo)
+	}
+	if r.MessageID != "msg-7" {
+		t.Errorf("messageId = %q, want msg-7", r.MessageID)
+	}
+}
+
+// A garbled/truncated property list must not panic and must still emit the
+// content entry (bodySize=0 here, so it completes on the header alone).
+func TestAMQPBasicPropertiesTruncated(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, _, _ := flows(40121, amqpPort)
+
+	var args []byte
+	args = appendU16(args, 0)
+	args = append(args, amqpShortStrBytes("orders")...)
+	args = append(args, amqpShortStrBytes("new")...)
+	args = append(args, 0x00)
+	publish := amqpFrame(amqpFrameMethod, 1, amqpMethod(amqpClassBasic, 40, args))
+
+	// flags claim content-type + correlation-id but the payload ends mid-string.
+	var hdr []byte
+	hdr = appendU16(hdr, amqpClassBasic)
+	hdr = appendU16(hdr, 0)
+	hdr = append(hdr, 0, 0, 0, 0, 0, 0, 0, 0) // body-size = 0
+	hdr = appendU16(hdr, 0x8000|0x0400)       // content-type|correlation-id
+	hdr = append(hdr, 20, 'a', 'b')           // shortstr claims len 20, only 2 bytes present
+	header := amqpFrame(amqpFrameHeader, 1, hdr)
+
+	stream := amqpHeader + string(publish) + string(header)
+	p.consumeStream(rNet, rTr, strings.NewReader(stream)) // must not panic
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1 (truncated props must still emit)", len(got))
 	}
 }
 

@@ -622,6 +622,10 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Request.Queue }
 	case "amqp.deliverytag", "deliverytag":
 		return func(e *api.Entry) string { return strconv.FormatUint(e.Request.DeliveryTag, 10) }
+	case "amqp.correlationid", "amqp.correlation-id":
+		return func(e *api.Entry) string { return e.Request.CorrelationID }
+	case "amqp.replyto", "amqp.reply-to":
+		return func(e *api.Entry) string { return e.Request.ReplyTo }
 	case "amqp.class":
 		return func(e *api.Entry) string { return e.Request.Class }
 	case "amqp.method":

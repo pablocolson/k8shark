@@ -47,27 +47,15 @@ func validGroupBy(key string) bool {
 //
 // Two pseudo-fields aggregate over both endpoints (deduped per entry, so a
 // self-call counts once): "namespace" groups by the k8s namespaces the entry
-// touches, and "workload" by "namespace/workload" with a workload -> pod/svc
-// name -> IP fallback so it degrades gracefully outside a cluster. Everything
-// else is a plain IFL field.
+// touches, and "workload" by the graph node label (see nodeLabel, graph.go):
+// "namespace/workload" with a workload -> pod/svc name -> IP fallback so it
+// degrades gracefully outside a cluster. Everything else is a plain IFL field.
 func groupKeys(e *api.Entry, groupBy string) []string {
 	switch groupBy {
 	case "namespace":
 		return endpointUnion(e, func(ep *api.Endpoint) string { return ep.Namespace })
 	case "workload":
-		return endpointUnion(e, func(ep *api.Endpoint) string {
-			label := ep.Workload
-			if label == "" {
-				label = ep.Name
-			}
-			if label == "" {
-				label = ep.IP
-			}
-			if label != "" && ep.Namespace != "" {
-				label = ep.Namespace + "/" + label
-			}
-			return label
-		})
+		return endpointUnion(e, nodeLabel)
 	default:
 		get := fieldGetter(groupBy)
 		if get == nil {

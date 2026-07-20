@@ -165,6 +165,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/stats/history", s.handleStatsHistory)
 	mux.HandleFunc("/api/summary", s.handleSummary)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
+	mux.HandleFunc("/api/graph", s.handleGraph)
 	mux.HandleFunc("/api/workers", s.handleWorkers)
 	mux.HandleFunc("/api/workers/capture", s.handleWorkerCapture)
 	mux.HandleFunc("/api/fields", s.handleFields)
@@ -239,6 +240,7 @@ type workerInfo struct {
 	RingPackets   uint64    `json:"ringPackets"`   // AF_PACKET kernel ring: cumulative packets delivered
 	RingDrops     uint64    `json:"ringDrops"`     // AF_PACKET kernel ring: cumulative packets dropped before userspace saw them
 	FlowsEvicted  uint64    `json:"flowsEvicted"`  // generic L4 flows dropped by the worker's maxFlows cap
+	TLSLagDrops   uint64    `json:"tlsLagDrops"`   // eBPF TLS streams truncated after a backpressure drop
 }
 
 func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +320,7 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 					wi.RingPackets = ws.RingPackets
 					wi.RingDrops = ws.RingDrops
 					wi.FlowsEvicted = ws.FlowsEvicted
+					wi.TLSLagDrops = ws.TLSLagDrops
 					wi.LastSeen = time.Now()
 				})
 			}
@@ -979,6 +982,24 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGraph serves GET /api/graph?filter=&since=&until=&focus=, aggregating
+// the buffered entries into the service call graph: one directed src→dst edge
+// per node pair with counts, error/warning totals and latency percentiles.
+// focus restricts to edges touching one service, matched against either
+// endpoint's workload, name, or namespace-qualified node label. See
+// serviceGraph (graph.go).
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	pred, err := s.queryPredicate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	entries := s.store.recent(s.store.capacity, pred)
+	writeJSON(w, map[string]any{
+		"edges": serviceGraph(entries, r.URL.Query().Get("focus")),
+	})
+}
+
 // handleWorkers serves GET /api/workers: every worker ever seen (connected or
 // not), with self-reported drop/capture state.
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
@@ -1064,6 +1085,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "# TYPE k8shark_worker_flows_evicted_total counter\n")
 		for _, wi := range workers {
 			fmt.Fprintf(&b, "k8shark_worker_flows_evicted_total{node=%q} %d\n", wi.Node, wi.FlowsEvicted)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_tls_lag_drops_total eBPF TLS streams truncated after a backpressure drop.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_tls_lag_drops_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_tls_lag_drops_total{node=%q} %d\n", wi.Node, wi.TLSLagDrops)
 		}
 	}
 

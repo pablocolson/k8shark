@@ -67,6 +67,11 @@ type Payload struct {
 	Queue       string `json:"queue,omitempty"`
 	DeliveryTag uint64 `json:"deliveryTag,omitempty"`
 	Class       string `json:"class,omitempty"`
+	// Basic content-header properties (DIS-9). The content-type property
+	// reuses the shared ContentType field below.
+	CorrelationID string `json:"correlationId,omitempty"`
+	ReplyTo       string `json:"replyTo,omitempty"`
+	MessageID     string `json:"messageId,omitempty"`
 
 	// L4 flows (tcp/udp/icmp)
 	Packets int64  `json:"packets,omitempty"`
@@ -297,6 +302,10 @@ type WorkerStats struct {
 	RingPackets   uint64 `json:"ringPackets"`   // AF_PACKET kernel ring: cumulative packets delivered
 	RingDrops     uint64 `json:"ringDrops"`     // AF_PACKET kernel ring: cumulative packets dropped before userspace saw them
 	FlowsEvicted  uint64 `json:"flowsEvicted"`  // generic L4 flows dropped by the worker's maxFlows cap
+	// TLSLagDrops counts eBPF-decrypted TLS streams abandoned because
+	// backpressure forced the drop of one of their interior chunks — the
+	// stream is closed with a clean truncation instead of being misparsed.
+	TLSLagDrops uint64 `json:"tlsLagDrops,omitempty"`
 }
 
 // WindowStats is a trailing-window slice of traffic, for "current" rates as

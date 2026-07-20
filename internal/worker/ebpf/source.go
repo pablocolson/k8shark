@@ -64,6 +64,13 @@ type TLSRecord struct {
 	SrcPort, DstPort uint16
 
 	Data []byte
+
+	// Lagged marks a data-less tombstone: backpressure forced the drop of one
+	// of this connection's interior chunks, so the byte stream has a hole the
+	// parser must never see. The consumer closes the stream with a clean
+	// truncation (exactly chanPipe's own lag policy); no further records for
+	// this ConnID will follow.
+	Lagged bool
 }
 
 // Config configures a Source.

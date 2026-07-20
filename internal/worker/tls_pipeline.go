@@ -97,6 +97,17 @@ func (p *pipeline) consumeTLS(ctx context.Context, src ebpf.Source) {
 				closeAll()
 				return
 			}
+			if rec.Lagged {
+				// Backpressure dropped an interior chunk of this connection
+				// upstream (see ebpf loader drainLoop): close the stream so
+				// its dissectors see a clean truncation instead of a hole.
+				if st := streams[rec.ConnID]; st != nil {
+					st.close()
+					delete(streams, rec.ConnID)
+					p.sink.tlsLagDrops.Add(1)
+				}
+				continue
+			}
 			if p.sink.paused() {
 				continue // hub told this worker to stop turning capture into entries
 			}

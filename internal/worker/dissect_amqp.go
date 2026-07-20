@@ -92,6 +92,7 @@ func (p *pipeline) consumeAMQPID(c connID, r io.Reader, isClient bool) {
 			if pend := channels[ch]; pend != nil {
 				if len(payload) >= 12 {
 					pend.bodySize = binary.BigEndian.Uint64(payload[4:12])
+					pend.props = parseAMQPBasicProps(payload[12:])
 				}
 				if pend.bodySize == 0 {
 					p.emitAMQPContent(isClient, c, cr, pend)
@@ -133,8 +134,19 @@ type amqpMethodInfo struct {
 type amqpPending struct {
 	info     amqpMethodInfo
 	bodySize uint64
+	props    amqpBasicProps
 	total    int    // true accumulated body length (for completion detection)
 	body     []byte // stored body, capped at p.bodyCap
+}
+
+// amqpBasicProps is the surfaced subset of the Basic content-header
+// properties (DIS-9). The rest of the property list is still walked (in flag
+// order) so these land at the right offsets, but not stored.
+type amqpBasicProps struct {
+	contentType   string
+	correlationID string
+	replyTo       string
+	messageID     string
 }
 
 // readAMQPFrame reads one frame: type(1) channel(2) size(4) payload(size)
@@ -375,6 +387,10 @@ func (p *pipeline) emitAMQPMethod(isClient bool, c connID, cr *capReader, info a
 func (p *pipeline) emitAMQPContent(isClient bool, c connID, cr *capReader, pend *amqpPending) {
 	summary := amqpSummary(pend.info, pend.bodySize)
 	req := amqpPayload(pend.info, summary, safeBody(string(pend.body)), int(pend.bodySize))
+	req.ContentType = pend.props.contentType
+	req.CorrelationID = pend.props.correlationID
+	req.ReplyTo = pend.props.replyTo
+	req.MessageID = pend.props.messageID
 	req.Raw = rawOf(cr)
 	p.emitAMQP(isClient, c, req, api.Payload{Summary: summary}, amqpStatus(pend.info))
 }
@@ -470,4 +486,187 @@ func amqpSkipBits(b []byte, off int) int {
 		return off + 1
 	}
 	return off
+}
+
+// --- Basic content-header properties (DIS-9) --------------------------------
+
+// amqpMaxTableDepth bounds recursion into nested field tables/arrays.
+const amqpMaxTableDepth = 8
+
+// Basic property-flag bits (§4.2.6.1: flags are packed from bit 15 down, in
+// property order; bit 0 of a flags word signals a continuation word).
+const (
+	amqpFlagContentType     = 0x8000
+	amqpFlagContentEncoding = 0x4000
+	amqpFlagHeaders         = 0x2000
+	amqpFlagDeliveryMode    = 0x1000
+	amqpFlagPriority        = 0x0800
+	amqpFlagCorrelationID   = 0x0400
+	amqpFlagReplyTo         = 0x0200
+	amqpFlagExpiration      = 0x0100
+	amqpFlagMessageID       = 0x0080
+	amqpFlagTimestamp       = 0x0040
+	amqpFlagType            = 0x0020
+	amqpFlagUserID          = 0x0010
+	amqpFlagAppID           = 0x0008
+	amqpFlagContinuation    = 0x0001
+)
+
+// parseAMQPBasicProps decodes the property-flags word(s) and property list of
+// a Basic content HEADER frame (b starts at the flags, i.e. payload[12:]).
+// Properties appear in flag order, so every flagged property before a
+// surfaced one must be walked at its exact wire size — including the headers
+// field table, which is skipped via a bounded decoder. Truncated or garbled
+// input never panics: the primitive readers' stop convention (offset >=
+// len(b)) simply leaves the remaining properties empty.
+func parseAMQPBasicProps(b []byte) amqpBasicProps {
+	var props amqpBasicProps
+	flags, o := amqpShort(b, 0)
+	// Basic defines no properties past the first flags word, but the low bit
+	// still signals continuation words; consume them (bounded) so the
+	// property list starts at the right offset.
+	for cont, n := flags&amqpFlagContinuation != 0, 0; cont && n < 8; n++ {
+		var w uint16
+		w, o = amqpShort(b, o)
+		cont = w&amqpFlagContinuation != 0
+	}
+	if flags&amqpFlagContentType != 0 {
+		props.contentType, o = amqpShortStr(b, o)
+	}
+	if flags&amqpFlagContentEncoding != 0 {
+		_, o = amqpShortStr(b, o)
+	}
+	if flags&amqpFlagHeaders != 0 {
+		o = amqpSkipFieldTable(b, o)
+	}
+	if flags&amqpFlagDeliveryMode != 0 {
+		o = amqpSkipBits(b, o) // octet
+	}
+	if flags&amqpFlagPriority != 0 {
+		o = amqpSkipBits(b, o) // octet
+	}
+	if flags&amqpFlagCorrelationID != 0 {
+		props.correlationID, o = amqpShortStr(b, o)
+	}
+	if flags&amqpFlagReplyTo != 0 {
+		props.replyTo, o = amqpShortStr(b, o)
+	}
+	if flags&amqpFlagExpiration != 0 {
+		_, o = amqpShortStr(b, o)
+	}
+	if flags&amqpFlagMessageID != 0 {
+		props.messageID, o = amqpShortStr(b, o)
+	}
+	// Nothing surfaced beyond message-id; timestamp/type/user-id/app-id would
+	// be walked here if a later property ever needs them.
+	_ = o
+	return props
+}
+
+// amqpSkipFieldTable advances past a field table without surfacing its
+// contents: a long (uint32) byte count followed by that many bytes of
+// shortstr-name/tagged-value pairs. The count bounds total bytes; the pairs
+// are still walked (depth-bounded recursion via amqpWalkValue, for nested
+// tables/arrays) so a table whose interior contradicts its declared size is
+// treated as garbled — the walk then stops the whole property parse (returns
+// len(b)) rather than trusting later offsets.
+func amqpSkipFieldTable(b []byte, off int) int {
+	n, o := amqpLong(b, off)
+	end := o + int(n)
+	if end > len(b) {
+		return len(b)
+	}
+	if !amqpWalkTable(b[o:end], 0) {
+		return len(b)
+	}
+	return end
+}
+
+// amqpWalkTable validates the name/value pairs of a field table body. Caller
+// has already bounds-checked t against the table's declared byte count.
+func amqpWalkTable(t []byte, depth int) bool {
+	if depth > amqpMaxTableDepth {
+		return false
+	}
+	o := 0
+	for o < len(t) {
+		o += 1 + int(t[o]) // shortstr name
+		if o > len(t) {
+			return false
+		}
+		var ok bool
+		o, ok = amqpWalkValue(t, o, depth)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// amqpWalkValue advances past one tagged field value (§4.2.5.5 / RabbitMQ
+// errata tag set), recursing (depth-bounded) into nested tables and arrays.
+// ok=false on an unknown tag, truncation, or too-deep nesting.
+func amqpWalkValue(t []byte, o, depth int) (int, bool) {
+	if o >= len(t) {
+		return o, false
+	}
+	tag := t[o]
+	o++
+	fixed := func(n int) (int, bool) {
+		if o+n > len(t) {
+			return o, false
+		}
+		return o + n, true
+	}
+	switch tag {
+	case 'V': // void
+		return o, true
+	case 't', 'b', 'B': // boolean, short-short-(u)int
+		return fixed(1)
+	case 's', 'u', 'U': // short-(u)int
+		return fixed(2)
+	case 'I', 'i', 'f': // long-(u)int, float
+		return fixed(4)
+	case 'D': // decimal
+		return fixed(5)
+	case 'l', 'L', 'd', 'T': // long-long-(u)int, double, timestamp
+		return fixed(8)
+	case 'S', 'x': // long string, byte array
+		if o+4 > len(t) {
+			return o, false
+		}
+		n, no := amqpLong(t, o)
+		if no+int(n) > len(t) {
+			return o, false
+		}
+		return no + int(n), true
+	case 'F': // nested table
+		if o+4 > len(t) {
+			return o, false
+		}
+		n, no := amqpLong(t, o)
+		if no+int(n) > len(t) || !amqpWalkTable(t[no:no+int(n)], depth+1) {
+			return o, false
+		}
+		return no + int(n), true
+	case 'A': // array: long byte count, then bare tagged values
+		if o+4 > len(t) {
+			return o, false
+		}
+		n, no := amqpLong(t, o)
+		end := no + int(n)
+		if end > len(t) {
+			return o, false
+		}
+		for p := no; p < end; {
+			var ok bool
+			p, ok = amqpWalkValue(t[:end], p, depth+1)
+			if !ok {
+				return o, false
+			}
+		}
+		return end, true
+	default:
+		return o, false
+	}
 }

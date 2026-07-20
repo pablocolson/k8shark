@@ -278,3 +278,53 @@ func TestChanPipeCloseUnblocksRead(t *testing.T) {
 		t.Error("Read after Close() should return an error (io.EOF)")
 	}
 }
+
+// TestConsumeTLSLaggedTombstone: a Lagged record (backpressure dropped one of
+// the connection's interior chunks upstream — see the ebpf loader's
+// drainLoop) must close the stream with a clean truncation and count the
+// drop, and a fresh record for the same ConnID afterward must start a NEW
+// stream rather than resume the truncated one past a hole.
+func TestConsumeTLSLaggedTombstone(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	src := newFakeTLSSource()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.consumeTLS(ctx, src)
+
+	// Half a request, then the tombstone: no entry may be emitted from the
+	// truncated stream, and the lag counter must tick.
+	src.ch <- ebpf.TLSRecord{PID: 1, TID: 7, ConnID: 42, Direction: ebpf.TLSDirWrite,
+		Data: []byte("GET /partial HTTP/1.1\r\nHost: e")}
+	src.ch <- ebpf.TLSRecord{ConnID: 42, Lagged: true}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && s.tlsLagDrops.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.tlsLagDrops.Load(); got != 1 {
+		t.Fatalf("tlsLagDrops = %d, want 1", got)
+	}
+	if got := drain(s); len(got) != 0 {
+		t.Fatalf("truncated stream emitted %d entries, want 0", len(got))
+	}
+
+	// Same ConnID again: a complete exchange must pair normally on a new stream.
+	src.ch <- ebpf.TLSRecord{PID: 1, TID: 7, ConnID: 42, Direction: ebpf.TLSDirWrite,
+		Data: []byte("GET /fresh HTTP/1.1\r\nHost: example.com\r\n\r\n")}
+	src.ch <- ebpf.TLSRecord{PID: 1, TID: 7, ConnID: 42, Direction: ebpf.TLSDirRead,
+		Data: []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")}
+
+	var entries []*api.Entry
+	for time.Now().Before(deadline) {
+		entries = drain(s)
+		if len(entries) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(entries) != 1 || entries[0].Request.Path != "/fresh" {
+		t.Fatalf("post-tombstone entries = %+v, want one /fresh pairing", entries)
+	}
+}

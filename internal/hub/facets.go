@@ -115,6 +115,11 @@ var fieldCatalog = []FieldSpec{
 	{Name: "amqp.routingkey", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "amqp.queue", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "amqp.deliverytag", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
+	// Basic content-header properties (DIS-9). correlation-id is per-message
+	// (unbounded cardinality), so it isn't value-tracked; reply-to is
+	// typically a small set of callback queues, so it is.
+	{Name: "amqp.correlationid", Type: FieldTypeFreetext, Operators: opsText, TrackValues: false},
+	{Name: "amqp.replyto", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 
 	// Previously display-only fields, now filterable (roadmap: "champs backend
 	// déjà calculés, invisibles côté UI").

@@ -405,12 +405,68 @@ marshals :**
   `go test -race ./...` (240 tests) et `tsc -b`/`vitest run` (94
   tests)/`npm run build` propres.
 
-Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-6,
-UI-7/8/11, MCP-1/4, OPS-6/7/10, TST-5/8,
+**Backlog, lot 10 — vague multi-agents (MCP-4, DIS-7, DIS-9, CAP-5, OPS-7),
+5 items traités :**
+
+- **MCP-4** : nouvel endpoint hub `GET /api/graph?filter=&since=&until=&focus=`
+  (`internal/hub/graph.go`) — arêtes `src→dst` nommées comme la service map
+  (workload, repli sur name puis ip, préfixées du namespace) avec count,
+  errors, warnings et p50/p95/max (percentiles réutilisés de `summary.go`),
+  triées par count décroissant ; `focus=<nom>` restreint aux arêtes touchant
+  ce nœud. Champ inconnu dans `?filter=` reste un 400. Outil MCP
+  `get_service_graph` (relais pur, args filter/since/until/focus,
+  `readOnlyHint`). Tests hub (`TestServiceGraph*`, `TestHandleGraph*`) +
+  MCP (`TestGetServiceGraph*`). Vérifié en réel : arêtes agrégées correctes,
+  `focus=rabbitmq` filtre bien, outil MCP stdio rend le JSON.
+- **DIS-7** : DNS sur TCP — `consumeStreamID` route le port 53 vers
+  `consumeDNSTCPID` (framing longueur 2 octets + `layers.DNS`), apparié par
+  le même mécanisme que l'UDP (`p.dns`/`dnsKey`) ; `dnsKey` renforcé avec le
+  port source client (IP+port+ID) pour ne plus mal apparier deux requêtes
+  concurrentes à ID identique (hostNetwork/SNAT). Tests
+  `TestDNSOverTCPPairing`, `TestDNSSameIDDistinctSourcePorts`,
+  `TestDNSOverTCPTruncatedFrame`.
+- **DIS-9** : propriétés Basic du content header AMQP — `parseAMQPBasicProps`
+  décode le bitmask de flags (+ mots de continuation bornés) et parcourt la
+  property-list en ordre de flags, sautant proprement la field-table
+  `headers` (décodeur récursif borné `amqpWalkTable`) pour atteindre
+  correlation-id/reply-to/message-id ; `Payload.ContentType` +
+  nouveaux champs additifs `CorrelationID`/`ReplyTo`/`MessageID` ; filtres
+  `amqp.correlationid`/`amqp.replyto` (`fieldGetter` + catalogue facets) ;
+  démo enrichie (corr-id/reply-to sur Publish/Deliver). Tests
+  `TestAMQPBasicProperties` (avec field-table à sauter),
+  `TestAMQPBasicPropertiesTruncated` (pas de panique). Vérifié en réel :
+  `/api/fields` liste les deux champs, filtre `amqp.replyto contains` rend
+  les bons `correlationId`/`replyTo`.
+- **CAP-5** : le `drainLoop` eBPF (`ebpf/loader.go`) ne droppe plus un chunk
+  intérieur (qui désynchroniserait le parseur pour le reste de la
+  connexion) : il marque le `ConnID` victime laggé et forwarde un unique
+  tombstone `TLSRecord{Lagged:true}` (data vide), `consumeTLS`
+  (`tls_pipeline.go`) ferme alors ce flux sur une troncature propre —
+  exactement la politique de `chanPipe`. Compteur `tlsLagDrops` remonté par
+  la chaîne `WorkerStats` → `/api/workers` → `/metrics`
+  (`k8shark_worker_tls_lag_drops_total`). Set des laggés borné
+  (`maxLaggedConns`). Test `TestConsumeTLSLaggedTombstone` (troncature +
+  reprise sur un flux neuf du même ConnID).
+- **OPS-7** : noms cluster-scoped suffixés par la release
+  (`k8shark.enrichClusterRoleName` → `k8shark-hub-enrich-<release>`, débloque
+  deux installs) ; points d'extension standards sur les trois workloads —
+  `imagePullSecrets`, `nodeSelector`/`affinity`/`tolerations` par composant
+  (défaut worker `operator: Exists` préservé), `podAnnotations`/`extraLabels`
+  (merge clé-à-clé sur les annotations prometheus.io du hub, l'utilisateur
+  gagne — piège du `merge` sprig qui écrase les valeurs falsy évité par une
+  boucle explicite). `helm lint`/`template` propres, noms distincts entre
+  releases vérifiés.
+
+  Vérifié au 2026-07-20 : `gofmt`/`go vet`/`go build`/`go test -race ./...`
+  (253 tests) propres, `helm lint` propre, endpoints/outils testés en réel
+  contre un hub+worker démo.
+
+Reste du backlog hors Phase 3 : CAP-7/8, DIS-6/8/10/11, HUB-6,
+UI-7/8/11, MCP-1, OPS-6/10, TST-5/8,
 EXT-2/3/4/5.
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : d'autres items S/M de ce backlog (MCP-1/MCP-4
-étendent l'outillage agent, TST-5 le lint, HUB-6 l'enrichissement k8s),
+Prochain chantier logique : finir UI-7/11 (vue Top + panneau redimensionnable,
+en cours), puis MCP-1 (export PCAP), TST-5 (lint), HUB-6 (watch k8s),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
