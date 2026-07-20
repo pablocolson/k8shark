@@ -85,6 +85,16 @@ hub:
       memory: 128Mi
     limits:
       memory: 512Mi
+  # export: optional continuous export of every captured entry to an external
+  # system, tapping the hub's fan-out (distinct from in-memory retention). Both
+  # backends are opt-in and non-blocking — a full buffer drops entries and
+  # counts them (k8shark_hub_export_dropped_total) rather than slowing capture.
+  # (OTLP is not implemented yet.)
+  export:
+    # file: append each entry as JSONL to this path (rotates by size).
+    file: ""
+    # webhook: POST batches of entries (a JSON array) to this URL.
+    webhook: ""
   # nodeSelector / affinity / tolerations: standard scheduling constraints
   # for the hub pod, passed through verbatim.
   nodeSelector: {}

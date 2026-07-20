@@ -135,6 +135,12 @@ spec:
             - --tls-cert=/etc/k8shark/tls/tls.crt
             - --tls-key=/etc/k8shark/tls/tls.key
             {{- end }}
+            {{- with .Values.hub.export.file }}
+            - --export-file={{ . }}
+            {{- end }}
+            {{- with .Values.hub.export.webhook }}
+            - --export-webhook={{ . }}
+            {{- end }}
           {{- if or .Values.hub.apiToken .Values.hub.workerToken .Values.hub.adminToken }}
           env:
             {{- if .Values.hub.apiToken }}

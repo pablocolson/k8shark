@@ -61,6 +61,15 @@ type Options struct {
 	// mesh already providing mTLS).
 	TLSCert string
 	TLSKey  string
+	// ExportFile / ExportWebhook (EXT-4) opt into the export sink: a copy of
+	// every ingested entry is fanned out to a rotating JSONL file and/or a
+	// batched webhook, for a SIEM/data-lake/log pipeline. Both empty (default)
+	// disable it entirely (see internal/hub/export.go). ExportFileMaxBytes and
+	// ExportWebhookInterval override the rotation/flush defaults (0 = default).
+	ExportFile            string
+	ExportFileMaxBytes    int64
+	ExportWebhook         string
+	ExportWebhookInterval time.Duration
 }
 
 // Server is the hub. Construct with New and start with Run.
@@ -96,6 +105,8 @@ type Server struct {
 	pending []pendingEntry
 
 	resolver *resolver // k8s IP -> pod/service name enrichment (no-op off-cluster)
+
+	exporter *exporter // optional EXT-4 export sink (nil when unconfigured)
 
 	uiDir string // optional: serve a built front from here (local dev)
 
@@ -142,6 +153,12 @@ func New(log *slog.Logger, opts Options) *Server {
 			WriteBufferSize: 4096,
 		},
 	}
+	s.exporter = newExporter(log, ExportOptions{
+		File:            opts.ExportFile,
+		FileMaxBytes:    opts.ExportFileMaxBytes,
+		Webhook:         opts.ExportWebhook,
+		WebhookInterval: opts.ExportWebhookInterval,
+	})
 	// Same-origin by default (plus the --allow-origin list): during a
 	// port-forward without a token — the default — an allow-any policy would
 	// let any web page open in the operator's browser open the WS and exfiltrate
@@ -187,9 +204,12 @@ func (s *Server) handler() http.Handler {
 func (s *Server) Run(ctx context.Context, addr string) error {
 	go s.statsLoop(ctx)
 	go s.resolver.run(ctx)
+	if s.exporter != nil {
+		go s.exporter.run(ctx)
+	}
 
 	useTLS := s.tlsCert != "" && s.tlsKey != ""
-	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "", "tls", useTLS)
+	s.log.Info("hub listening", "addr", addr, "ui", s.uiDir != "", "auth", s.apiToken != "", "tls", useTLS, "export", s.exporter != nil)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.handler(),
@@ -218,7 +238,22 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 		s.log.Info("hub shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		s.stopExporter()
+		return err
+	}
+}
+
+// stopExporter waits for the export drain goroutine to flush and exit after ctx
+// cancellation, bounded so a wedged sink can't hold shutdown open indefinitely.
+func (s *Server) stopExporter() {
+	if s.exporter == nil {
+		return
+	}
+	select {
+	case <-s.exporter.done:
+	case <-time.After(exportShutdownTimeout):
+		s.log.Warn("export drain did not finish before shutdown deadline")
 	}
 }
 
@@ -307,6 +342,7 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 				s.resolver.enrich(env.Entry)
 				raw := s.store.add(env.Entry)
 				s.broadcast(env.Entry, raw)
+				s.exporter.export(raw) // nil-safe; no-op when export unconfigured
 				s.workerUpdate(node, func(wi *workerInfo) {
 					wi.Entries++
 					wi.LastSeen = time.Now()
@@ -1032,6 +1068,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Currently connected workers.", strconv.Itoa(st.Workers))
 	metric("k8shark_hub_broadcast_dropped_total", "counter",
 		"Entries dropped to slow front clients.", strconv.FormatInt(dropped, 10))
+	if s.exporter != nil {
+		metric("k8shark_hub_export_dropped_total", "counter",
+			"Entries/batches dropped by the export sink (full buffer or failed delivery).",
+			strconv.FormatUint(s.exporter.drops(), 10))
+	}
 	metric("k8shark_hub_entries_per_sec", "gauge",
 		"Entries ingested per second, trailing 5s window.", strconv.FormatFloat(st.EntriesPerSec, 'f', -1, 64))
 	metric("k8shark_hub_buffer_entries", "gauge",

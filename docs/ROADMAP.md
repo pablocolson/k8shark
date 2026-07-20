@@ -594,12 +594,46 @@ marshals :**
   `npm run lint` côté UI). Vérifié : `make lint` exit 0, `go test -race
   ./...` (6 paquets, 0 échec) + `vitest`/`build` (105) propres.
 
+**Backlog, lot 15 — corrélation trace (EXT-3) et export continu (EXT-4) :**
+
+- **EXT-3** : corrélation de bout en bout par trace/request ID — extraction
+  dans `completeResponse` (chemin HTTP, couvre aussi le HTTPS eBPF) depuis
+  les en-têtes déjà normalisés en minuscules, par précédence W3C
+  `traceparent` (2e champ, trace-id validé 32 hex) → `x-request-id` →
+  `x-correlation-id` → vide (jamais fabriqué). Nouveau champ additif
+  top-level `Entry.TraceID` (`json:"traceId,omitempty"`), champ de filtre
+  `trace.id` (getter + catalogue facets freetext, comme
+  `amqp.correlationid`). UI : `traceId?` sur `Entry`, ligne trace +
+  bouton « view whole trace » dans EntryDetail (applique `trace.id ==
+  "…"`) rendu seulement si présent. Tests `TestHTTPTraceIDExtraction`
+  (5 sous-cas), `TestCompileFilterTraceID`. Vérifié en réel : `trace.id`
+  listé dans `/api/fields`.
+- **EXT-4** : export continu optionnel côté hub (`internal/hub/export.go`),
+  branché sur le fan-out d'ingestion (réutilise le JSON déjà marshalé par
+  `store.add`, HUB-4), strictement non bloquant (canal bufferisé 4096 +
+  goroutine de drain, drop+comptage sur débordement, jamais de ralenti
+  d'ingestion). Deux backends opt-in : fichier JSONL avec rotation par
+  taille (`--export-file`, `.1`…`.5`) et webhook POST par lots (JSON array,
+  flush à l'intervalle ou 500 entrées, drop+comptage sur échec/non-2xx,
+  timeout borné). OTLP explicitement différé. Compteur
+  `k8shark_hub_export_dropped_total` sur `/metrics` (si activé). Flags CLI
+  `--export-file`/`--export-webhook`(+max-bytes/interval), values
+  `hub.export.{file,webhook}` plombées en args. Tests `TestExportJSONLFile`,
+  `TestExportFileRotates`, `TestExportWebhook`, `TestExportDropsOnBackpressure`,
+  `TestNewExporterNilWhenUnconfigured` (agent mort à la dernière étape ;
+  métriques/CLI/helm/tests complétés inline). Vérifié en réel : 159 lignes
+  JSONL valides écrites sous trafic démo, métrique présente, helm rend les
+  args.
+
+  Vérifié au 2026-07-20 : `make lint` (golangci-lint + eslint) exit 0,
+  `go test -race ./...` (0 échec) + `vitest`/`build` (105) + `helm lint`
+  propres.
+
 Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/11,
-OPS-10, TST-8, EXT-2/3/4 (EXT-5 fait : hygiène GitHub + réf IFL ;
-screenshots/GIF restants).
+OPS-10, TST-8, EXT-2 (EXT-5 fait sauf screenshots/GIF).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : EXT-3 (corrélation trace/request ID),
-DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo), EXT-4 (export sink),
+Prochain chantier logique : DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo),
+EXT-2 (ingestion PCAP hors-ligne), OPS-10/TST-8 (durcissement CI),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

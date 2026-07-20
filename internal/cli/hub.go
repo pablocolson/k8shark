@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/pablocolson/k8shark/internal/config"
 	"github.com/pablocolson/k8shark/internal/hub"
@@ -20,6 +21,9 @@ func hubCmd() *cobra.Command {
 	var bufferSize int
 	var allowOrigins []string
 	var tlsCert, tlsKey string
+	var exportFile, exportWebhook string
+	var exportFileMaxBytes int64
+	var exportWebhookInterval time.Duration
 	cmd := &cobra.Command{
 		Use:   "hub",
 		Short: "Run the hub server (aggregates worker traffic, serves the API)",
@@ -39,14 +43,18 @@ func hubCmd() *cobra.Command {
 				return fmt.Errorf("--tls-cert and --tls-key must be set together")
 			}
 			s := hub.New(log, hub.Options{
-				UIDir:          uiDir,
-				APIToken:       apiToken,
-				WorkerToken:    workerToken,
-				AdminToken:     adminToken,
-				BufferSize:     bufferSize,
-				AllowedOrigins: allowOrigins,
-				TLSCert:        tlsCert,
-				TLSKey:         tlsKey,
+				UIDir:                 uiDir,
+				APIToken:              apiToken,
+				WorkerToken:           workerToken,
+				AdminToken:            adminToken,
+				BufferSize:            bufferSize,
+				AllowedOrigins:        allowOrigins,
+				TLSCert:               tlsCert,
+				TLSKey:                tlsKey,
+				ExportFile:            exportFile,
+				ExportFileMaxBytes:    exportFileMaxBytes,
+				ExportWebhook:         exportWebhook,
+				ExportWebhookInterval: exportWebhookInterval,
 			})
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -62,5 +70,9 @@ func hubCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&allowOrigins, "allow-origin", nil, "extra browser Origin allowed on the API and WebSockets, repeatable (default: same-origin only; \"*\" allows any)")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate file; with --tls-key, serve HTTPS/wss instead of plain HTTP")
 	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key file for --tls-cert")
+	cmd.Flags().StringVar(&exportFile, "export-file", "", "also append each entry as JSONL to this file (rotates by size)")
+	cmd.Flags().Int64Var(&exportFileMaxBytes, "export-file-max-bytes", 0, "rotate the export file past this size (0 = default)")
+	cmd.Flags().StringVar(&exportWebhook, "export-webhook", "", "also POST batches of entries (JSON array) to this URL")
+	cmd.Flags().DurationVar(&exportWebhookInterval, "export-webhook-interval", 0, "flush a partial webhook batch after this long (0 = default)")
 	return cmd
 }
