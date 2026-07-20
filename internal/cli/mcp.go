@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +14,7 @@ func mcpCmd() *cobra.Command {
 	var hubURL string
 	var hubToken string
 	var allowCapture bool
+	var printConfig bool
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Run an MCP server exposing captured traffic to AI agents",
@@ -29,6 +31,21 @@ func mcpCmd() *cobra.Command {
 				hubToken = os.Getenv("K8SHARK_API_TOKEN")
 			}
 
+			if printConfig {
+				// Not serving: stdout is free for the ready-to-paste client
+				// config block (.mcp.json / claude_desktop_config.json shape).
+				server := map[string]any{
+					"command": "k8shark",
+					"args":    []string{"mcp", "--hub", hubURL},
+				}
+				if hubToken != "" {
+					server["env"] = map[string]string{"K8SHARK_API_TOKEN": hubToken}
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(map[string]any{"mcpServers": map[string]any{"k8shark": server}})
+			}
+
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
@@ -38,5 +55,6 @@ func mcpCmd() *cobra.Command {
 	cmd.Flags().StringVar(&hubURL, "hub", "http://localhost:8898", "hub base URL")
 	cmd.Flags().StringVar(&hubToken, "hub-token", "", "bearer token for the hub API (default $K8SHARK_API_TOKEN)")
 	cmd.Flags().BoolVar(&allowCapture, "allow-capture", false, "register the (placeholder) PCAP capture tool")
+	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print a ready-to-paste MCP client config block (.mcp.json shape) and exit")
 	return cmd
 }

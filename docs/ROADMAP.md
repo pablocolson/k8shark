@@ -338,12 +338,26 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   → `-32600`, initialize/get_stats corrects, arrivée désordonnée confirmant
   le dispatch concurrent. `go test -race ./...` (236 tests) propre.
 
+**Backlog, lot 7 — MCP-8, documentation d'installation du serveur MCP :**
+
+- **MCP-8** : nouveau guide `docs/mcp.md` — prérequis hub joignable
+  (`tap`/`proxy`/`make dev`), enregistrement Claude Code (`claude mcp add
+  k8shark -- k8shark mcp --hub ...`), bloc `.mcp.json` pour Claude
+  Desktop/Cursor, auth `--hub-token`/`$K8SHARK_API_TOKEN`, table des 12
+  outils avec ce que chacun répond, notes readOnlyHint/plafond
+  100 Ko/pagination `before_seq`/stdout-protocole. Nouveau flag `k8shark
+  mcp --print-config` qui imprime le bloc client prêt à coller (env token
+  inclus quand configuré, stdout libre puisqu'on ne sert pas). README :
+  ligne CLI mcp enrichie (outils manquants + lien guide), flags hub
+  complétés (`--worker-token`/`--admin-token`/`--allow-origin` de
+  SEC-5/SEC-6), lignes de values `hub.workerToken`/`hub.adminToken`.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4/8, OPS-6/7/10, SEC-7, TST-5/8,
+UI-7/8/11, MCP-1/4, OPS-6/7/10, SEC-7, TST-5/8,
 EXT-2/3/4/5.
 Prochain chantier logique : d'autres items S/M de ce backlog (SEC-7 apporte le
-TLS hub et clôt le thème sécurité ; MCP-8 documente l'installation du serveur
-MCP), ou le démarrage de la **Phase 3** (gros
+TLS hub et clôt le thème sécurité ; MCP-1/MCP-4 étendent l'outillage agent),
+ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 

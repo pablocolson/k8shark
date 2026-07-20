@@ -104,7 +104,7 @@ registry/tag, plus how to wire an `imagePullSecrets` for a private registry.
 | `k8shark console` | Stream component logs (`--component hub\|worker\|front`). |
 | `k8shark hub` | Run the hub server (used by the hub container). `--port`, `--serve-ui <dir>` for local dev. |
 | `k8shark worker` | Run the node worker (used by the worker DaemonSet). See flags below. |
-| `k8shark mcp` | Run an MCP server exposing captured traffic to AI agents (`get_stats`, `list_entries`, `get_entry`, `get_traffic_summary`, `get_timeline`, `get_workers`, `list_filter_fields`, `list_namespaces`, `list_workloads`). `--hub-token` when the hub requires auth. |
+| `k8shark mcp` | Run an MCP server exposing captured traffic to AI agents (`get_stats`, `list_entries`, `get_entry`, `get_traffic_summary`, `get_timeline`, `diff_traffic`, `find_error_clusters`, `get_workers`, `list_filter_fields`, `list_namespaces`, `list_workloads`). `--hub-token` when the hub requires auth; `--print-config` prints a ready-to-paste client config block. **Setup guide: [docs/mcp.md](docs/mcp.md).** |
 | `k8shark version` | Print the version. |
 
 Worker flags of note: `--demo` / `--demo-rps` (synthetic traffic, opt-in
@@ -116,7 +116,10 @@ headers, on by default), `--enable-tls` / `--proc-root` (eBPF TLS capture),
 
 Hub flags of note: `--buffer` (in-memory entry ring size), `--api-token`
 (require a bearer token on `/api` and the WebSocket endpoints; also read from
-`$K8SHARK_API_TOKEN`).
+`$K8SHARK_API_TOKEN`), `--worker-token` / `--admin-token` (distinct
+credentials for the worker ingest channel and the mutating control endpoints;
+each falls back to the API token when unset), `--allow-origin` (extra browser
+Origins allowed on the API/WebSockets; default is same-origin only).
 
 ## Configuration (Helm values)
 
@@ -128,6 +131,8 @@ Hub flags of note: `--buffer` (in-memory entry ring size), `--api-token`
 | `hub.replicas` | `1` | Hub replica count (state is per-pod; there is no shared backing store). |
 | `hub.bufferSize` | `0` | Entry ring size (`0` = 10000). ~10s of history at 1k entries/s — raise for busy clusters. |
 | `hub.apiToken` | `""` | When set, `/api` + WebSockets require this bearer token; workers and the front proxy get it via a Secret. |
+| `hub.workerToken` | `""` | Distinct token required on `/ws/worker` (entry ingest); the worker DaemonSet picks it up automatically. Falls back to `apiToken`. |
+| `hub.adminToken` | `""` | Distinct token required on mutating API calls (capture pause/resume), also grants reads. Falls back to `apiToken`. |
 | `pdb.enabled` | `true` | PodDisruptionBudget protecting the hub during node drains. |
 | `worker.demo` | `false` | Generate synthetic traffic instead of capturing (opt-in only). |
 | `worker.iface` | `""` | Capture interface (`""` = any). |
