@@ -424,7 +424,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 	br := bufio.NewReader(r)
 	peek, err := br.Peek(5)
 	if err != nil {
-		io.Copy(io.Discard, br)
+		_, _ = io.Copy(io.Discard, br)
 		return
 	}
 	key := c.key()
@@ -456,7 +456,7 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 				// request; pairing them here would consume the pending
 				// request early and shift every later response onto the
 				// wrong request for the rest of the connection.
-				io.Copy(io.Discard, resp.Body)
+				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 				continue
 			}
@@ -597,7 +597,7 @@ func (p *pipeline) consumeWSFrames(br *bufio.Reader, src, dst api.Endpoint) {
 	var hdr [2]byte
 	for {
 		if _, err := io.ReadFull(br, hdr[:]); err != nil {
-			io.Copy(io.Discard, br)
+			_, _ = io.Copy(io.Discard, br)
 			return
 		}
 		opcode := hdr[0] & 0x0f
@@ -607,26 +607,26 @@ func (p *pipeline) consumeWSFrames(br *bufio.Reader, src, dst api.Endpoint) {
 		case 126:
 			var ext [2]byte
 			if _, err := io.ReadFull(br, ext[:]); err != nil {
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
 			payloadLen = uint64(binary.BigEndian.Uint16(ext[:]))
 		case 127:
 			var ext [8]byte
 			if _, err := io.ReadFull(br, ext[:]); err != nil {
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
 			payloadLen = binary.BigEndian.Uint64(ext[:])
 		}
 		if payloadLen > wsMaxPayload {
-			io.Copy(io.Discard, br) // desynced or absurd length — stop cleanly
+			_, _ = io.Copy(io.Discard, br) // desynced or absurd length — stop cleanly
 			return
 		}
 		var maskKey [4]byte
 		if masked {
 			if _, err := io.ReadFull(br, maskKey[:]); err != nil {
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
 		}
@@ -638,7 +638,7 @@ func (p *pipeline) consumeWSFrames(br *bufio.Reader, src, dst api.Endpoint) {
 		}
 		preview := make([]byte, int(previewN))
 		if _, err := io.ReadFull(br, preview); err != nil {
-			io.Copy(io.Discard, br) // truncated frame — stop, don't misparse
+			_, _ = io.Copy(io.Discard, br) // truncated frame — stop, don't misparse
 			return
 		}
 		if masked {
@@ -649,13 +649,13 @@ func (p *pipeline) consumeWSFrames(br *bufio.Reader, src, dst api.Endpoint) {
 		if remaining := payloadLen - previewN; remaining > 0 {
 			if _, err := io.CopyN(io.Discard, br, int64(remaining)); err != nil {
 				p.emitWSFrame(src, dst, opcode, preview, payloadLen)
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
 		}
 		p.emitWSFrame(src, dst, opcode, preview, payloadLen)
 		if opcode == wsOpcodeClose {
-			io.Copy(io.Discard, br) // no frames follow a close
+			_, _ = io.Copy(io.Discard, br) // no frames follow a close
 			return
 		}
 	}
@@ -859,13 +859,13 @@ func (p *pipeline) consumeDNSTCPID(c connID, r io.Reader, isRequest bool) {
 	var lenBuf [2]byte
 	for {
 		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-			io.Copy(io.Discard, r)
+			_, _ = io.Copy(io.Discard, r)
 			return
 		}
 		n := int(binary.BigEndian.Uint16(lenBuf[:]))
 		if n == 0 {
 			// A zero-length frame is never valid DNS; the framing is broken.
-			io.Copy(io.Discard, r)
+			_, _ = io.Copy(io.Discard, r)
 			return
 		}
 		msg := make([]byte, n)
@@ -874,7 +874,7 @@ func (p *pipeline) consumeDNSTCPID(c connID, r io.Reader, isRequest bool) {
 		}
 		var dns layers.DNS
 		if err := dns.DecodeFromBytes(msg, gopacket.NilDecodeFeedback); err != nil {
-			io.Copy(io.Discard, r)
+			_, _ = io.Copy(io.Discard, r)
 			return // not DNS after all — drop the rest of this direction
 		}
 		if !marked {
@@ -961,7 +961,7 @@ func (p *pipeline) drainBody(rc io.ReadCloser) (body string, truncated bool, ful
 	}
 	defer rc.Close()
 	if !p.captureBodies || p.bodyCap <= 0 {
-		io.Copy(io.Discard, rc)
+		_, _ = io.Copy(io.Discard, rc)
 		return "", false, 0
 	}
 	var first [1]byte

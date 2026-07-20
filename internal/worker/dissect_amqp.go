@@ -59,10 +59,10 @@ func (p *pipeline) consumeAMQPID(c connID, r io.Reader, isClient bool) {
 		if peek, err := br.Peek(8); err == nil && string(peek[:4]) == "AMQP" {
 			if !(peek[4] == 0x00 && peek[5] == 0x00 && peek[6] == 0x09 && peek[7] == 0x01) {
 				p.log.Debug("amqp: unsupported protocol version, skipping", "version", peek[4:8])
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
-			br.Discard(8)
+			_, _ = br.Discard(8)
 		}
 	}
 
@@ -70,7 +70,7 @@ func (p *pipeline) consumeAMQPID(c connID, r io.Reader, isClient bool) {
 	for {
 		ftype, ch, payload, full, err := readAMQPFrame(br)
 		if err != nil {
-			io.Copy(io.Discard, br)
+			_, _ = io.Copy(io.Discard, br)
 			return
 		}
 		switch ftype {
@@ -462,18 +462,6 @@ func amqpShortStr(b []byte, off int) (string, int) {
 	n := int(b[off])
 	off++
 	if off+n > len(b) {
-		return "", len(b)
-	}
-	return string(b[off : off+n]), off + n
-}
-
-func amqpLongStr(b []byte, off int) (string, int) {
-	if off < 0 || off+4 > len(b) {
-		return "", len(b)
-	}
-	n := int(binary.BigEndian.Uint32(b[off:]))
-	off += 4
-	if n < 0 || off+n > len(b) {
 		return "", len(b)
 	}
 	return string(b[off : off+n]), off + n

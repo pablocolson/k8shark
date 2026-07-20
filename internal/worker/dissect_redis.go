@@ -51,7 +51,7 @@ func (p *pipeline) consumeRedisID(c connID, r io.Reader, isRequest bool, proto a
 		for {
 			v, err := parseRESP(br)
 			if err != nil {
-				io.Copy(io.Discard, br)
+				_, _ = io.Copy(io.Discard, br)
 				return
 			}
 			cmd := renderRedisCommand(v)
@@ -86,7 +86,7 @@ func (p *pipeline) consumeRedisID(c connID, r io.Reader, isRequest bool, proto a
 	for {
 		v, err := parseRESP(br)
 		if err != nil {
-			io.Copy(io.Discard, br)
+			_, _ = io.Copy(io.Discard, br)
 			return
 		}
 		if isRedisPush(v) {

@@ -1,0 +1,47 @@
+version: "2"
+
+# Report every finding (no per-linter or same-issue caps), so CI never hides a
+# real defect behind the default display limits.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+# A deliberately tight, bug-focused linter set — not a style crusade. These
+# catch real defects (unchecked errors, dead assignments, suspicious vet
+# patterns, unused code) without flooding the diff with formatting opinions
+# (gofmt already runs separately, and the codebase has its own house style).
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+  settings:
+    staticcheck:
+      # Keep the bug (SA*) and simplification (S*/ST*) checks; drop the QF*
+      # "quickfix" refactor suggestions, which are style opinions.
+      checks:
+        - all
+        - -QF*
+  exclusions:
+    generated: lax
+    paths:
+      # The front-end lives under ui/; its node_modules vendors a stray Go
+      # file (flatted) that is not ours. Never lint anything under ui/.
+      - ui/
+    rules:
+      # Test files may ignore more errors for brevity.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # A Close() on a resource being torn down is the universally accepted
+      # "nothing to do with the error" idiom; requiring a wrapper func just
+      # adds noise. Meaningful ignores (draining reads, deadlines) are made
+      # explicit with `_ =` in the code instead. Matched by source line so it
+      # covers both interface- and concrete-typed closers.
+      - linters:
+          - errcheck
+        source: \.Close\(\)$

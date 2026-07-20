@@ -577,12 +577,29 @@ marshals :**
   `k8shark_worker_tcp_loss_events_total` présent sur `/metrics`,
   `make deploy-manifest-check` OK, RBAC deploy vérifié.
 
+**Backlog, lot 14 — TST-5, lint Go + front (inline) :**
+
+- **TST-5** : `.golangci.yml` (v2) — set ciblé bug (errcheck, govet,
+  ineffassign, staticcheck, unused, misspell), pas de croisade de style
+  (QF* désactivés, `.Close()` exclu par ligne source car idiome accepté,
+  caps d'affichage à 0 pour ne jamais masquer un défaut, `ui/` exclu à
+  cause du fichier Go parasite de node_modules). Findings réels corrigés :
+  ~10 `io.Copy(io.Discard, …)`/`br.Discard`/`SetWriteDeadline` rendus
+  explicites (`_, _ =`/`_ =`), fonction morte `amqpLongStr` supprimée
+  (le field-table walker utilise `amqpWalkValue`). Front : flat config
+  `eslint.config.js` (typescript-eslint recommended + react-hooks
+  exhaustive-deps/rules-of-hooks, `no-explicit-any` en warning) — déjà
+  propre, zéro finding. Cible `make lint` (golangci-lint + eslint), scripts
+  npm `lint`, étapes CI (`golangci-lint-action@v7` pin v2.12.2 côté Go,
+  `npm run lint` côté UI). Vérifié : `make lint` exit 0, `go test -race
+  ./...` (6 paquets, 0 échec) + `vitest`/`build` (105) propres.
+
 Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/11,
-OPS-10, TST-5/8, EXT-2/3/4 (EXT-5 fait : hygiène GitHub + réf IFL ;
+OPS-10, TST-8, EXT-2/3/4 (EXT-5 fait : hygiène GitHub + réf IFL ;
 screenshots/GIF restants).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : TST-5 (lint Go + eslint), EXT-3 (corrélation
-trace/request ID), DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo),
+Prochain chantier logique : EXT-3 (corrélation trace/request ID),
+DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo), EXT-4 (export sink),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

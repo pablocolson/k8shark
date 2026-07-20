@@ -224,7 +224,7 @@ func (s *sink) pump(ctx context.Context) {
 	go s.reader(conn)
 
 	write := func(b []byte) error {
-		conn.SetWriteDeadline(time.Now().Add(sinkWriteTimeout))
+		_ = conn.SetWriteDeadline(time.Now().Add(sinkWriteTimeout))
 		return conn.WriteMessage(websocket.TextMessage, b)
 	}
 

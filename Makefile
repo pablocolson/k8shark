@@ -63,6 +63,13 @@ test:
 test-ui:
 	cd ui && npm ci --no-audit --no-fund && npm test
 
+## lint Go (golangci-lint: errcheck/govet/staticcheck/ineffassign/unused/misspell)
+## and the front-end (eslint: typescript-eslint + react-hooks). gofmt/go vet run
+## in `test`; this is the deeper static analysis.
+lint:
+	GOFLAGS=-mod=mod GOTOOLCHAIN=local golangci-lint run ./...
+	cd ui && npm ci --no-audit --no-fund && npm run lint
+
 ## run the Go benchmarks for the hot paths (hub fan-out/ingest/filter, dissectors)
 bench:
 	GOFLAGS=-mod=mod GOTOOLCHAIN=local go test -run='^$$' -bench=. -benchmem \
