@@ -69,16 +69,16 @@ func TestNamespaceFilter(t *testing.T) {
 		expr string
 		want bool
 	}{
-		{`namespace == "shop"`, true},       // matches src
-		{`namespace == "platform"`, true},   // matches dst
+		{`namespace == "shop"`, true},         // matches src
+		{`namespace == "platform"`, true},     // matches dst
 		{`namespace == "kube-system"`, false}, // matches neither
-		{`ns == "shop"`, true},              // alias
-		{`namespace contains "plat"`, true}, // substring on dst
+		{`ns == "shop"`, true},                // alias
+		{`namespace contains "plat"`, true},   // substring on dst
 		// != means "neither side matches" (exclude noise), not the De
 		// Morgan-literal "either side differs" (which response.status-style
 		// != would make true for nearly every entry here).
-		{`namespace != "shop"`, false},        // src does match "shop"
-		{`namespace != "kube-system"`, true},  // neither side is kube-system
+		{`namespace != "shop"`, false},       // src does match "shop"
+		{`namespace != "kube-system"`, true}, // neither side is kube-system
 	}
 	for _, c := range cases {
 		pred, err := CompileFilter(c.expr)
@@ -427,7 +427,7 @@ func TestInOperator(t *testing.T) {
 		{`dst.namespace in ("prod", "staging")`, false},
 		{`response.status in (500, 502, 503)`, true},
 		{`response.status in (200, 201)`, false},
-		{`namespace in ("shop")`, true},    // either-side pseudo-field
+		{`namespace in ("shop")`, true}, // either-side pseudo-field
 		{`namespace in ("kube-system")`, false},
 		{`protocol in ("http", "dns")`, true},
 	}
@@ -445,7 +445,7 @@ func TestInOperator(t *testing.T) {
 
 func TestInOperatorSyntaxErrors(t *testing.T) {
 	cases := []string{
-		`dst.namespace in`,                // missing list entirely
+		`dst.namespace in`,                 // missing list entirely
 		`dst.namespace in "shop"`,          // missing parens
 		`dst.namespace in (`,               // unterminated
 		`dst.namespace in ()`,              // empty list
