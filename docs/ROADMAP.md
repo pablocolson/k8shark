@@ -19,7 +19,7 @@ TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
 **Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
 implémentés (commits `ec1a47f`, `5a985d2`).
 
-**Phase 2 — en cours (7/9).**
+**Phase 2 — en cours (8/9).**
 
 - CAP-1 : programme cBPF généré au runtime (`internal/worker/capture/bpf.go`,
   symbolique via `golang.org/x/net/bpf`, vérifié par `bpf.VM` sur des trames
@@ -72,9 +72,20 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   taille de cluster décroissante, avec 2-3 IDs d'exemple par cluster.
   Vérifié en bout en bout via stdio JSON-RPC contre un hub réel.
 
-Prochain item logique par valeur/effort : **DIS-5** (sniff Redis/Postgres/AMQP
-sur ports non standard, S) ou **UI-1** (ancrage du scroll pendant le
-streaming, M).
+- UI-1 : ancrage du scroll pendant le streaming (`ui/src/components/TrafficTable.tsx`)
+  — un `useLayoutEffect` détecte combien d'entrées ont été préfixées en tête
+  de liste depuis le dernier rendu (comparaison de l'ancien premier id dans
+  le nouveau tableau) et compense `scrollTop` d'autant de `ROW_HEIGHT`
+  lorsque l'utilisateur a défilé au-delà du haut, plus une pastille
+  flottante « N new entries » (façon Slack) pour revenir en un clic ;
+  désactivé quand un tri est actif (l'ordre n'est alors plus un préfixe).
+  Vérifié en navigateur avec du trafic démo réel : une ligne repérée avant
+  de défiler reste visuellement en place pendant que des centaines
+  d'entrées arrivent au-dessus.
+
+Prochain item logique par valeur/effort : **UI-2** (timeline/histogramme
+cliquable, M) ou **DIS-5** (sniff Redis/Postgres/AMQP sur ports non
+standard, S).
 
 ## Phases proposées
 

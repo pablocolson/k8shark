@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TrafficTable } from "./TrafficTable";
 import type { Entry } from "../types";
@@ -199,6 +199,85 @@ describe("TrafficTable", () => {
       await user.click(screen.getByLabelText("some other input"));
       await user.keyboard("{ArrowDown}");
       expect(onSelect).not.toHaveBeenCalled();
+    });
+  });
+
+  // ROW_HEIGHT isn't exported; 29 mirrors the private const in TrafficTable.tsx.
+  const ROW_HEIGHT = 29;
+
+  describe("scroll anchoring on new (prepended) entries", () => {
+    it("compensates scrollTop and shows a pill when scrolled away from the top", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" }), entry({ id: "d" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+      scrollEl.scrollTop = 100; // user has scrolled down, away from the live edge
+
+      // Live flush prepends one new entry ahead of the previous top ("b").
+      const withNew = [entry({ id: "a" }), ...initial];
+      rerender(<TrafficTable {...baseProps} entries={withNew} />);
+
+      expect(scrollEl.scrollTop).toBe(100 + ROW_HEIGHT);
+      expect(screen.getByText("↑ 1 new entry")).toBeInTheDocument();
+    });
+
+    it("does not compensate or show a pill when already at the top (following live)", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+      scrollEl.scrollTop = 0;
+
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "a" }), ...initial]} />);
+
+      expect(scrollEl.scrollTop).toBe(0);
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
+    });
+
+    it("accumulates the count across multiple prepends and clicking the pill scrolls to top", async () => {
+      const user = userEvent.setup();
+      const initial = [entry({ id: "c" }), entry({ id: "d" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+      scrollEl.scrollTop = 50;
+
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "b" }), ...initial]} />);
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "a" }), entry({ id: "b" }), ...initial]} />);
+
+      expect(screen.getByText("↑ 2 new entries")).toBeInTheDocument();
+
+      await user.click(screen.getByText("↑ 2 new entries"));
+      expect(scrollEl.scrollTop).toBe(0);
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
+    });
+
+    it("does not show the pill while a column sort is active", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+
+      // Sort by latency so displayEntries no longer just mirrors arrival order.
+      const latencyHeader = screen.getByText("latency");
+      latencyHeader.click();
+      scrollEl.scrollTop = 100;
+
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "a" }), ...initial]} />);
+
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
+    });
+
+    it("resets the pill count when the user manually scrolls back to the top", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+      scrollEl.scrollTop = 100;
+
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "a" }), ...initial]} />);
+      expect(screen.getByText("↑ 1 new entry")).toBeInTheDocument();
+
+      scrollEl.scrollTop = 0;
+      fireEvent.scroll(scrollEl);
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
     });
   });
 });

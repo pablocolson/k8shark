@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { isTypingTarget } from "../dom";
 import type { Entry } from "../types";
@@ -214,6 +214,48 @@ export const TrafficTable = memo(function TrafficTable({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [displayEntries, selectedId, onSelect, rowVirtualizer]);
 
+  // Live entries are prepended to the front of the list (newest first), so
+  // without this every flush shifts whatever the user is currently reading
+  // further down the page — the single biggest irritant of the real-time
+  // view. topIdRef tracks the previous top-of-list id; when new rows appear
+  // above it and the user has scrolled away from the very top (still
+  // reading, not following live), compensate scrollTop by exactly their
+  // height so the row under the user's eye doesn't move, and count them for
+  // the "N new entries" pill below. Runs in a layout effect so the
+  // compensation lands before the browser paints the shifted rows.
+  const topIdRef = useRef<string | null>(null);
+  const [newCount, setNewCount] = useState(0);
+  useLayoutEffect(() => {
+    const newTopId = displayEntries[0]?.id ?? null;
+
+    // A sort recomputes the whole order rather than prepending — "entries
+    // arrived above where I was reading" isn't a meaningful concept once
+    // sorted, so there's nothing to compensate or count.
+    if (sort || newTopId === null) {
+      topIdRef.current = newTopId;
+      setNewCount(0);
+      return;
+    }
+
+    const prevTopId = topIdRef.current;
+    topIdRef.current = newTopId;
+    const el = scrollRef.current;
+    if (!prevTopId || prevTopId === newTopId || !el) return;
+
+    const prependedCount = displayEntries.findIndex((e) => e.id === prevTopId);
+    if (prependedCount <= 0) return; // not found (buffer reset) or nothing prepended
+
+    if (el.scrollTop > 0) {
+      el.scrollTop += prependedCount * ROW_HEIGHT;
+      setNewCount((n) => n + prependedCount);
+    }
+  }, [displayEntries, sort]);
+
+  const scrollToTop = () => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setNewCount(0);
+  };
+
   return (
     <div className="table-wrap-outer">
       <div className="table-toolbar">
@@ -229,7 +271,18 @@ export const TrafficTable = memo(function TrafficTable({
           </span>
         )}
       </div>
-      <div className="table-wrap" ref={scrollRef}>
+      {!sort && newCount > 0 && (
+        <button type="button" className="new-entries-pill" onClick={scrollToTop}>
+          ↑ {newCount} new {newCount === 1 ? "entry" : "entries"}
+        </button>
+      )}
+      <div
+        className="table-wrap"
+        ref={scrollRef}
+        onScroll={(e) => {
+          if (e.currentTarget.scrollTop <= 0) setNewCount(0);
+        }}
+      >
         <table className="traffic">
           <thead>
             <tr>
