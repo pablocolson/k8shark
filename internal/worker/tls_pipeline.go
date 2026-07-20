@@ -116,7 +116,7 @@ func (p *pipeline) consumeTLS(ctx context.Context, src ebpf.Source) {
 // gopacket.Flow directions). Both directions share one connID, so request and
 // response pair through the same p.conns/p.flows key.
 //
-// Dispatch is by content-sniff (consumeTLSStream / sniffTLS), NOT by port:
+// Dispatch is by content-sniff (consumeSniffedID / sniffTLS), NOT by port:
 // the synthetic connID has no real port, so the AF_PACKET port dispatch would
 // send everything to HTTP. The request/response role
 // is taken from the stream's content (Postgres/Redis message direction, HTTP
@@ -154,16 +154,21 @@ func newTLSStream(p *pipeline, rec ebpf.TLSRecord) *tlsStream {
 		}
 	}
 	st := &tlsStream{write: newChanPipe(64), read: newChanPipe(64)}
-	go p.consumeTLSStream(c, st.write, true) // write = data sent by the process = request side
-	go p.consumeTLSStream(c, st.read, false) // read  = data received        = response side
+	go p.consumeSniffedID(c, st.write, true) // write = data sent by the process = request side
+	go p.consumeSniffedID(c, st.read, false) // read  = data received        = response side
 	return st
 }
 
-// consumeTLSStream dispatches one direction of a decrypted TLS stream to the
-// right dissector by sniffing its opening bytes (there is no port to key on).
-// isRequest is the direction hint (see tlsStream doc): the write direction is
-// the request side when the traced process is the client.
-func (p *pipeline) consumeTLSStream(c connID, r io.Reader, isRequest bool) {
+// consumeSniffedID dispatches one direction of a stream to the right
+// dissector by sniffing its opening bytes instead of its port. Used by two
+// callers with no usable port to key on: the eBPF TLS path above (decrypted
+// records carry a synthetic connID) and, from pipeline.go's consumeStreamID,
+// the AF_PACKET fallback for a well-known protocol remapped onto a
+// non-standard port. isRequest is the direction hint (see tlsStream doc for
+// the eBPF case; consumeStreamID derives it from the ephemeral/higher-port
+// heuristic instead) — sniffTLS only falls back to it for the handful of
+// message types ambiguous from content alone.
+func (p *pipeline) consumeSniffedID(c connID, r io.Reader, isRequest bool) {
 	br := bufio.NewReader(r)
 	proto, req := sniffTLS(br, isRequest)
 	switch proto {

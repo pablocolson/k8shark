@@ -201,6 +201,60 @@ func TestBuildRespPorts(t *testing.T) {
 	}
 }
 
+// --- non-standard ports (DIS-5 content-sniff fallback) ----------------------
+
+// A well-known protocol (Redis here) exposed on a port none of the
+// respPorts/amqpPorts/pgPort rules recognize must still be detected by
+// content-sniffing the stream (consumeSniffedID), instead of silently
+// falling into the HTTP sniff and being lost as a bare TCP flow.
+func TestConsumeStreamNonStandardPortSniffsRedis(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	const oddPort = 16380 // not 6379, not configured, not pg/amqp
+	rNet, rTr, sNet, sTr := flows(40022, oddPort)
+
+	req := "*1\r\n$4\r\nPING\r\n"
+	resp := "+PONG\r\n"
+
+	p.consumeStream(rNet, rTr, strings.NewReader(req))
+	p.consumeStream(sNet, sTr, strings.NewReader(resp))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].Protocol != api.ProtocolRedis {
+		t.Errorf("protocol = %q, want %q (content-sniff fallback should still recognize RESP)", got[0].Protocol, api.ProtocolRedis)
+	}
+}
+
+// Plain HTTP on a port matching none of the well-known dissectors must keep
+// working through the new content-sniff fallback (sniffTLS's default case is
+// HTTP) — a regression guard for the common case.
+func TestConsumeStreamNonStandardPortFallsBackToHTTP(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	const oddPort = 18080
+	rNet, rTr, sNet, sTr := flows(40023, oddPort)
+
+	req := "GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
+	resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+	p.consumeStream(rNet, rTr, strings.NewReader(req))
+	p.consumeStream(sNet, sTr, strings.NewReader(resp))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].Protocol != api.ProtocolHTTP {
+		t.Errorf("protocol = %q, want %q", got[0].Protocol, api.ProtocolHTTP)
+	}
+	if got[0].StatusCode != 200 {
+		t.Errorf("statusCode = %d, want 200", got[0].StatusCode)
+	}
+}
+
 // --- Postgres ---------------------------------------------------------------
 
 func pgMsg(typ byte, payload []byte) []byte {

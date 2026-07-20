@@ -307,7 +307,15 @@ func (p *pipeline) consumeStreamID(c connID, r io.Reader) {
 	case dst == pgPort || src == pgPort:
 		p.consumePostgresID(c, r, dst == pgPort)
 	default:
-		p.consumeHTTPID(c, r)
+		// No well-known port matched (Redis/Postgres/AMQP remapped onto a
+		// non-standard port is common with k8s Services): content-sniff
+		// instead of assuming HTTP, reusing the same sniffTLS-based dispatch
+		// the eBPF TLS path uses (tls_pipeline.go) since it has no port to
+		// key on either. dirHint follows newFlow's (dissect_l4.go)
+		// "ephemeral/higher port is the client" heuristic; sniffTLS only
+		// falls back to it for the few message types ambiguous from content
+		// alone.
+		p.consumeSniffedID(c, r, src > dst)
 	}
 }
 
