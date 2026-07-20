@@ -26,8 +26,19 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: k8shark-worker
+        {{- with .Values.worker.extraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: k8shark-worker
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       hostNetwork: {{ .Values.worker.hostNetwork }}
       {{- if .Values.worker.tls.enabled }}
       hostPID: true
@@ -162,5 +173,15 @@ spec:
               - { key: ca.crt, path: ca.crt }
         {{- end }}
       {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
       tolerations:
-        - operator: Exists
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

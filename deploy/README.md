@@ -68,6 +68,10 @@ once to each of the `k8shark-hub` / `k8shark-worker` / `k8shark-front`
 ServiceAccounts (`imagePullSecrets` on a ServiceAccount is picked up
 automatically by any pod using it).
 
+(When installing via the Helm chart instead of these manifests, set the
+chart's top-level `imagePullSecrets` value — it wires the reference into all
+three pod specs for you.)
+
 ## Verification checklist
 
 1. Pods are up, and the worker DaemonSet has one pod per node — including

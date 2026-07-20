@@ -14,6 +14,11 @@ image:
   # way. See templates/_helpers.tpl's k8shark.imagePullPolicy.
   pullPolicy: ""
 
+# imagePullSecrets: pull-secret names added to every pod spec (hub, worker,
+# front) — needed when image.registry is private. Standard list form,
+# e.g. [{name: my-registry-secret}]; create the Secret itself out-of-band.
+imagePullSecrets: []
+
 # priorityClassName is applied to the hub pods when set (empty = cluster default).
 priorityClassName: ""
 
@@ -80,6 +85,16 @@ hub:
       memory: 128Mi
     limits:
       memory: 512Mi
+  # nodeSelector / affinity / tolerations: standard scheduling constraints
+  # for the hub pod, passed through verbatim.
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  # podAnnotations: extra annotations on the hub pod template, merged key-wise
+  # over the chart's default prometheus.io/* scrape annotations (yours win).
+  podAnnotations: {}
+  # extraLabels: extra labels on the hub pod template.
+  extraLabels: {}
 
 front:
   port: 80
@@ -91,6 +106,14 @@ front:
       memory: 64Mi
     limits:
       memory: 256Mi
+  # nodeSelector / affinity / tolerations: standard scheduling constraints
+  # for the front pod, passed through verbatim.
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  # podAnnotations / extraLabels: extra metadata on the front pod template.
+  podAnnotations: {}
+  extraLabels: {}
 
 worker:
   # demo: generate synthetic traffic instead of capturing real packets.
@@ -155,6 +178,17 @@ worker:
       memory: 128Mi
     limits:
       memory: 512Mi
+  # nodeSelector / affinity: standard scheduling constraints for the capture
+  # DaemonSet, passed through verbatim — e.g. to keep it off GPU/spot nodes.
+  nodeSelector: {}
+  affinity: {}
+  # tolerations: the default tolerates every taint so the DaemonSet captures
+  # on all nodes, control-plane included. Override to narrow coverage.
+  tolerations:
+    - operator: Exists
+  # podAnnotations / extraLabels: extra metadata on the worker pod template.
+  podAnnotations: {}
+  extraLabels: {}
 
 # networkPolicy: restrict which pods can reach the hub and front Services.
 # Off by default (matches the chart's existing opt-in posture — see the note

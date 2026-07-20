@@ -13,6 +13,16 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
+k8shark.enrichClusterRoleName: the enrichment ClusterRole/Binding are
+cluster-scoped, so their names must be unique per release — a second release
+in another namespace would otherwise fail on a Helm ownership conflict over
+the same fixed-name object.
+*/}}
+{{- define "k8shark.enrichClusterRoleName" -}}
+k8shark-hub-enrich-{{ .Release.Name }}
+{{- end -}}
+
+{{/*
 k8shark.imagePullPolicy: .Values.image.pullPolicy wins when explicitly set;
 otherwise Always for a mutable "latest"/empty tag (so `helm upgrade` actually
 re-pulls instead of a node's cached "latest" silently no-op'ing) and

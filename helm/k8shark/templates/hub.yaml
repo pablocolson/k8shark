@@ -12,7 +12,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: k8shark-hub-enrich
+  name: {{ include "k8shark.enrichClusterRoleName" . }}
   labels:
     {{- include "k8shark.labels" . | nindent 4 }}
 rules:
@@ -26,13 +26,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: k8shark-hub-enrich
+  name: {{ include "k8shark.enrichClusterRoleName" . }}
   labels:
     {{- include "k8shark.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: k8shark-hub-enrich
+  name: {{ include "k8shark.enrichClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
     name: k8shark-hub
@@ -81,21 +81,40 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: k8shark-hub
+        {{- with .Values.hub.extraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         # Legacy annotation-based Prometheus discovery (e.g. a scrape config
         # using kubernetes_sd_configs against pods). A prometheus-operator
         # setup should use metrics.serviceMonitor.enabled instead. Harmless
-        # when nothing scrapes annotations.
-        prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.hub.port | quote }}
-        prometheus.io/path: /metrics
-        {{- if .Values.hub.tls.enabled }}
-        prometheus.io/scheme: https
-        {{- end }}
+        # when nothing scrapes annotations. hub.podAnnotations is merged on
+        # top, key-wise — a user annotation wins over these defaults rather
+        # than rendering a duplicate key.
+        {{- $ann := dict "prometheus.io/scrape" "true" "prometheus.io/port" (.Values.hub.port | toString) "prometheus.io/path" "/metrics" }}
+        {{- if .Values.hub.tls.enabled }}{{- $_ := set $ann "prometheus.io/scheme" "https" }}{{- end }}
+        {{- range $k, $v := .Values.hub.podAnnotations }}{{- $_ := set $ann $k (toString $v) }}{{- end }}
+        {{- toYaml $ann | nindent 8 }}
     spec:
       serviceAccountName: k8shark-hub
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.hub.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
         runAsNonRoot: true

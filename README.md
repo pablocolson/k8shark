@@ -129,6 +129,9 @@ verify a private-CA cert on its `wss://` hub connection).
 |-------|---------|-------------|
 | `image.registry` | `ghcr.io/pablocolson` | Image registry/repo prefix. |
 | `image.tag` | `latest` | Image tag — pin this for real deployments (`latest` + `IfNotPresent` silently no-ops on upgrade). |
+| `imagePullSecrets` | `[]` | Pull-secret names (e.g. `[{name: my-secret}]`) added to all three workloads, for a private `image.registry`. |
+| `hub.nodeSelector` / `worker.nodeSelector` / `front.nodeSelector` | `{}` | Per-component scheduling constraints (`affinity` and `tolerations` exist too). |
+| `worker.tolerations` | `[{operator: Exists}]` | Defaults to tolerating every taint so the capture DaemonSet covers all nodes — narrow it to exclude nodes. |
 | `hub.port` | `8898` | Hub listen port. |
 | `hub.replicas` | `1` | Hub replica count (state is per-pod; there is no shared backing store). |
 | `hub.bufferSize` | `0` | Entry ring size (`0` = 10000). ~10s of history at 1k entries/s — raise for busy clusters. |
