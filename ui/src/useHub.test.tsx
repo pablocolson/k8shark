@@ -154,6 +154,27 @@ describe("useHub background-tab flush", () => {
     expect(latest?.entries.map((e) => e.id)).toEqual(["e1"]);
   });
 
+  it("treats an entryBatch frame as its entries in order, through the same buffer path", () => {
+    const ws = FakeWebSocket.instances[0];
+
+    act(() => {
+      ws.emit({
+        type: "entryBatch",
+        entries: [fakeEntry("b1"), fakeEntry("b2"), fakeEntry("b3")],
+      });
+    });
+
+    // Buffered like individual frames, not yet flushed into React state.
+    expect(latest?.entries).toHaveLength(0);
+
+    act(() => {
+      rafCallbacks[0](0);
+    });
+
+    // Newest first after flush, so the batch's oldest ends up last.
+    expect(latest?.entries.map((e) => e.id)).toEqual(["b3", "b2", "b1"]);
+  });
+
   it("migrates a rAF flush already pending when the tab goes hidden to the timeout fallback, instead of leaving it stuck", () => {
     const ws = FakeWebSocket.instances[0];
 

@@ -10,6 +10,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -121,17 +122,22 @@ func TestE2EWorkerToFrontRoundTrip(t *testing.T) {
 	writeEnvelope(t, worker, api.Envelope{Type: api.MsgEntry, Entry: httpEntry("h2")})
 
 	// The front must receive exactly the two http entries, in order, and never
-	// the redis one (server-side filtered out before fan-out).
+	// the redis one (server-side filtered out before fan-out). Live entries
+	// arrive as MsgEntryBatch frames (HUB-4 coalesces the fan-out); how the
+	// two entries split across batches depends on timing, so collect until
+	// both are seen.
 	var got []string
 	for len(got) < 2 {
 		env := readEnvelope(t, front)
-		if env.Type != api.MsgEntry { // stats frames may interleave; ignore
+		if env.Type != api.MsgEntryBatch { // stats frames may interleave; ignore
 			continue
 		}
-		if env.Entry.Protocol != api.ProtocolHTTP {
-			t.Fatalf("front received a non-http entry despite the filter: %+v", env.Entry)
+		for _, e := range env.Entries {
+			if e.Protocol != api.ProtocolHTTP {
+				t.Fatalf("front received a non-http entry despite the filter: %+v", e)
+			}
+			got = append(got, e.ID)
 		}
-		got = append(got, env.Entry.ID)
 	}
 	if got[0] != "h1" || got[1] != "h2" {
 		t.Errorf("front entry IDs = %v, want [h1 h2]", got)
@@ -223,4 +229,78 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestReplayHistoryChunksChronological: HUB-4 replays history as chunked
+// MsgEntryBatch frames assembled from the store's cached JSON. 250 entries
+// must arrive as 3 frames (100+100+50) whose concatenated entries are in
+// strict chronological order.
+func TestReplayHistoryChunksChronological(t *testing.T) {
+	s := New(discardLogger(), Options{})
+	for i := 0; i < 250; i++ {
+		s.store.add(httpEntry(fmt.Sprintf("e%03d", i)))
+	}
+	c := &frontClient{send: make(chan []byte, 16)}
+	s.replayHistory(c)
+	close(c.send)
+
+	var ids []string
+	frames := 0
+	for b := range c.send {
+		var env api.Envelope
+		if err := json.Unmarshal(b, &env); err != nil {
+			t.Fatalf("frame %d is not valid JSON: %v", frames, err)
+		}
+		if env.Type != api.MsgEntryBatch {
+			t.Fatalf("frame type = %q, want %q", env.Type, api.MsgEntryBatch)
+		}
+		frames++
+		for _, e := range env.Entries {
+			ids = append(ids, e.ID)
+		}
+	}
+	if frames != 3 {
+		t.Errorf("frames = %d, want 3 (250 entries chunked by %d)", frames, replayBatchSize)
+	}
+	if len(ids) != 250 || ids[0] != "e000" || ids[len(ids)-1] != "e249" {
+		t.Fatalf("got %d ids, first %q last %q; want 250, e000..e249", len(ids), ids[0], ids[len(ids)-1])
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i-1] >= ids[i] {
+			t.Fatalf("chronological order breaks at %d: %s >= %s", i, ids[i-1], ids[i])
+		}
+	}
+}
+
+// TestE2EReplayArrivesAsBatches: a front connecting after traffic exists gets
+// the history over the real WebSocket as MsgEntryBatch frames.
+func TestE2EReplayArrivesAsBatches(t *testing.T) {
+	s := New(discardLogger(), Options{})
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	for i := 0; i < 5; i++ {
+		e := httpEntry(fmt.Sprintf("h%d", i))
+		raw := s.store.add(e)
+		s.broadcast(e, raw) // no front clients yet: fast-path no-op
+	}
+
+	front := dialWS(t, wsURL(ts.URL, "/ws"), nil)
+	defer front.Close()
+
+	var ids []string
+	for len(ids) < 5 {
+		env := readEnvelope(t, front)
+		if env.Type != api.MsgEntryBatch { // the initial stats frame interleaves
+			continue
+		}
+		for _, e := range env.Entries {
+			ids = append(ids, e.ID)
+		}
+	}
+	for i, id := range ids {
+		if want := fmt.Sprintf("h%d", i); id != want {
+			t.Fatalf("replay ids = %v, want chronological h0..h4", ids)
+		}
+	}
 }

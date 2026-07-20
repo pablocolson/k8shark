@@ -189,6 +189,16 @@ export function useHub(initialFilter: string): HubState {
         }
         bufRef.current.push(msg.entry);
         scheduleFlush();
+      } else if (msg.type === "entryBatch" && msg.entries) {
+        // A batch is equivalent to its entries arriving as individual frames,
+        // oldest first — feed them through the same buffer/pause path.
+        const batch = msg.entries;
+        if (pausedRef.current) {
+          setPausedCount((c) => c + batch.length);
+          return;
+        }
+        for (const e of batch) bufRef.current.push(e);
+        scheduleFlush();
       } else if (msg.type === "filterError") {
         setFilterError(msg.error ?? "invalid filter");
       }

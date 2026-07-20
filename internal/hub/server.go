@@ -89,6 +89,12 @@ type Server struct {
 
 	broadcastDropped int64 // entries dropped to slow front clients (atomic)
 
+	// bmu guards pending, the entries accumulated between fan-out flushes.
+	// broadcast appends here and arms a one-shot flush timer; flushBroadcast
+	// drains it into one MsgEntryBatch frame per client (see broadcast).
+	bmu     sync.Mutex
+	pending []pendingEntry
+
 	resolver *resolver // k8s IP -> pod/service name enrichment (no-op off-cluster)
 
 	uiDir string // optional: serve a built front from here (local dev)
@@ -295,8 +301,8 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 		case api.MsgEntry:
 			if env.Entry != nil {
 				s.resolver.enrich(env.Entry)
-				s.store.add(env.Entry)
-				s.broadcast(env.Entry)
+				raw := s.store.add(env.Entry)
+				s.broadcast(env.Entry, raw)
 				s.workerUpdate(node, func(wi *workerInfo) {
 					wi.Entries++
 					wi.LastSeen = time.Now()
@@ -524,19 +530,54 @@ func (s *Server) frontReader(c *frontClient) {
 	}
 }
 
+// replayBatchSize bounds how many entries share one replay frame — chunking
+// keeps individual frames modest while still collapsing a 500-entry replay
+// from 500 frames into a handful.
+const replayBatchSize = 100
+
 // replayHistory resends up to 500 recent entries matching the client's current
-// predicate, newest last so the UI appends chronologically. Used on initial
-// connect and after a live filter swap.
+// predicate, oldest first so the UI appends chronologically, as chunked
+// MsgEntryBatch frames assembled from the store's cached JSON — no
+// re-marshaling per connection or filter swap. Used on initial connect and
+// after a live filter swap.
 func (s *Server) replayHistory(c *frontClient) {
 	c.mu.RLock()
 	pred := c.pred
 	c.mu.RUnlock()
-	history := s.store.recent(500, pred)
-	for i := len(history) - 1; i >= 0; i-- {
-		if b, err := json.Marshal(api.Envelope{Type: api.MsgEntry, Entry: history[i]}); err == nil {
-			c.trySend(b)
+	history := s.store.recentRaw(500, pred) // newest first
+	// Walk chunks from the slice's tail (the oldest entries) toward its head,
+	// reversing within each chunk, so the client sees strict chronological
+	// order across all frames.
+	for end := len(history); end > 0; end -= replayBatchSize {
+		start := end - replayBatchSize
+		if start < 0 {
+			start = 0
 		}
+		chunk := history[start:end]
+		raws := make([][]byte, 0, len(chunk))
+		for i := len(chunk) - 1; i >= 0; i-- {
+			raws = append(raws, chunk[i])
+		}
+		c.trySend(assembleBatch(raws))
 	}
+}
+
+// assembleBatch builds a MsgEntryBatch frame by splicing cached per-entry
+// JSON into the envelope — the entries are never re-marshaled.
+func assembleBatch(raws [][]byte) []byte {
+	size := len(`{"type":"entryBatch","entries":[]}`) + len(raws)
+	for _, r := range raws {
+		size += len(r)
+	}
+	b := make([]byte, 0, size)
+	b = append(b, `{"type":"entryBatch","entries":[`...)
+	for i, r := range raws {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, r...)
+	}
+	return append(b, `]}`...)
 }
 
 // frontWriter drains the send channel to the socket.
@@ -579,28 +620,69 @@ func (c *frontClient) matches(e *api.Entry) bool {
 	return c.pred == nil || c.pred(e)
 }
 
-// broadcast fans an entry out to every front client whose filter accepts it.
-func (s *Server) broadcast(e *api.Entry) {
-	// Fast path: with no front clients, skip the marshal entirely (the worker
-	// ingest path calls this for every entry).
+// pendingEntry is one not-yet-flushed live entry: the entry for per-client
+// filtering plus its cached JSON for zero-marshal batch assembly.
+type pendingEntry struct {
+	entry *api.Entry
+	raw   []byte
+}
+
+// broadcastFlushInterval is how long live entries coalesce before fan-out.
+// At 2000 entries/s with 10 clients, per-entry fan-out means 20000 frames and
+// syscalls per second; a 30ms window collapses that by ~60x for an added
+// latency no dashboard user can perceive.
+const broadcastFlushInterval = 30 * time.Millisecond
+
+// broadcast queues a live entry for the next batched fan-out. raw is the
+// store's cached JSON for e (a nil raw — marshal failure — is skipped). The
+// first entry of a window arms a one-shot flush timer, so an idle hub runs no
+// ticker and tests exercising the handler need no background loop.
+func (s *Server) broadcast(e *api.Entry, raw []byte) {
+	if raw == nil {
+		return
+	}
+	// Fast path: with no front clients, don't even queue.
 	s.mu.RLock()
 	empty := len(s.frontClients) == 0
 	s.mu.RUnlock()
 	if empty {
 		return
 	}
+	s.bmu.Lock()
+	s.pending = append(s.pending, pendingEntry{entry: e, raw: raw})
+	first := len(s.pending) == 1
+	s.bmu.Unlock()
+	if first {
+		time.AfterFunc(broadcastFlushInterval, s.flushBroadcast)
+	}
+}
 
-	b, err := json.Marshal(api.Envelope{Type: api.MsgEntry, Entry: e})
-	if err != nil {
+// flushBroadcast drains the pending window and sends each front client one
+// MsgEntryBatch frame with the subset matching its filter, assembled from the
+// entries' cached JSON. A client whose send buffer is full drops the whole
+// batch (counted per entry in broadcastDropped, keeping the metric's unit).
+func (s *Server) flushBroadcast() {
+	s.bmu.Lock()
+	batch := s.pending
+	s.pending = nil
+	s.bmu.Unlock()
+	if len(batch) == 0 {
 		return
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for c := range s.frontClients {
-		if c.matches(e) {
-			if !c.trySend(b) {
-				atomic.AddInt64(&s.broadcastDropped, 1)
+		raws := make([][]byte, 0, len(batch))
+		for _, p := range batch {
+			if c.matches(p.entry) {
+				raws = append(raws, p.raw)
 			}
+		}
+		if len(raws) == 0 {
+			continue
+		}
+		if !c.trySend(assembleBatch(raws)) {
+			atomic.AddInt64(&s.broadcastDropped, int64(len(raws)))
 		}
 	}
 }

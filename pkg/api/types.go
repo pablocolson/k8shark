@@ -237,6 +237,11 @@ type MessageType string
 const (
 	// worker -> hub / hub -> front
 	MsgEntry MessageType = "entry"
+	// hub -> front: several entries in one frame (oldest first). The hub
+	// coalesces the live feed and history replay into batches to cut
+	// frame/syscall count under load; semantically identical to that many
+	// MsgEntry frames in order.
+	MsgEntryBatch MessageType = "entryBatch"
 	// hub -> front: periodic aggregate metrics
 	MsgStats MessageType = "stats"
 	// worker -> hub: identifies the worker on connect
@@ -256,6 +261,7 @@ const (
 type Envelope struct {
 	Type          MessageType    `json:"type"`
 	Entry         *Entry         `json:"entry,omitempty"`
+	Entries       []*Entry       `json:"entries,omitempty"`
 	Stats         *Stats         `json:"stats,omitempty"`
 	Hello         *Hello         `json:"hello,omitempty"`
 	Filter        string         `json:"filter,omitempty"`

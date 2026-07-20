@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -16,6 +17,11 @@ type store struct {
 	capacity int
 	next     int // write cursor into buf
 	full     bool
+
+	// raw mirrors buf slot-for-slot with each entry's JSON, marshaled once in
+	// add (an entry is immutable after add — enrichment happens before). It
+	// feeds the WS fan-out and history replay so neither ever re-marshals.
+	raw [][]byte
 
 	// byID indexes live buffer entries for O(1) get(). Kept in sync with buf:
 	// an entry is added on write and removed when its slot is overwritten.
@@ -36,6 +42,7 @@ type store struct {
 func newStore(capacity int) *store {
 	return &store{
 		buf:        make([]*api.Entry, capacity),
+		raw:        make([][]byte, capacity),
 		capacity:   capacity,
 		byID:       map[string]*api.Entry{},
 		byProtocol: map[string]int64{},
@@ -44,8 +51,11 @@ func newStore(capacity int) *store {
 	}
 }
 
-// add records an entry and updates aggregates.
-func (s *store) add(e *api.Entry) {
+// add records an entry, updates aggregates, and returns the entry's cached
+// JSON (marshaled exactly once, after Seq is assigned; nil on a marshal
+// failure). The bytes are immutable — callers hand them straight to the WS
+// fan-out.
+func (s *store) add(e *api.Entry) []byte {
 	s.mu.Lock()
 
 	// Evict the entry currently in this slot from the id index before overwriting
@@ -55,13 +65,17 @@ func (s *store) add(e *api.Entry) {
 	}
 	s.buf[s.next] = e
 	s.byID[e.ID] = e
+
+	s.total++
+	e.Seq = s.total
+	raw, _ := json.Marshal(e)
+	s.raw[s.next] = raw
+
 	s.next = (s.next + 1) % s.capacity
 	if s.next == 0 {
 		s.full = true
 	}
 
-	s.total++
-	e.Seq = s.total
 	s.byProtocol[string(e.Protocol)]++
 	if e.Status != "" {
 		s.byStatus[e.Status]++
@@ -75,6 +89,7 @@ func (s *store) add(e *api.Entry) {
 	// Facet observation uses its own mutex and must run outside store's
 	// critical section, so it never extends store.mu's hold time.
 	s.facets.observe(e)
+	return raw
 }
 
 // trimRate drops rate samples older than the 5s window. Caller holds the lock.
@@ -109,6 +124,30 @@ func (s *store) recent(limit int, match func(*api.Entry) bool) []*api.Entry {
 		}
 		if match == nil || match(e) {
 			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// recentRaw returns the cached JSON of up to limit of the most recent entries
+// matching match, newest first — the zero-marshal path behind history replay.
+func (s *store) recentRaw(limit int, match func(*api.Entry) bool) [][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([][]byte, 0, limit)
+	n := s.capacity
+	if !s.full {
+		n = s.next
+	}
+	for i := 0; i < n && len(out) < limit; i++ {
+		idx := (s.next - 1 - i + s.capacity) % s.capacity
+		e := s.buf[idx]
+		if e == nil || s.raw[idx] == nil {
+			continue
+		}
+		if match == nil || match(e) {
+			out = append(out, s.raw[idx])
 		}
 	}
 	return out

@@ -8,6 +8,7 @@ package hub
 // that bites at scale.
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -67,9 +68,11 @@ func BenchmarkStoreAdd(b *testing.B) {
 	}
 }
 
-// BenchmarkBroadcast measures the fan-out cost — one marshal followed by a
-// filtered dispatch to each connected client — at a few client counts, the
-// hub's main point of contention.
+// BenchmarkBroadcast measures the fan-out cost — queueing entries into the
+// pending window plus the batched, cached-JSON dispatch to each connected
+// client — at a few client counts, the hub's main point of contention. Each
+// iteration queues one entry; the flush is forced explicitly so the benchmark
+// captures the full path deterministically instead of timer-dependent.
 func BenchmarkBroadcast(b *testing.B) {
 	for _, n := range []int{1, 10, 50} {
 		b.Run(fmt.Sprintf("clients=%d", n), func(b *testing.B) {
@@ -95,11 +98,19 @@ func BenchmarkBroadcast(b *testing.B) {
 			b.Cleanup(func() { close(stop) })
 
 			e := benchEntry()
+			raw, err := json.Marshal(e)
+			if err != nil {
+				b.Fatal(err)
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				s.broadcast(e)
+				s.broadcast(e, raw)
+				if i%64 == 63 {
+					s.flushBroadcast()
+				}
 			}
+			s.flushBroadcast()
 		})
 	}
 }

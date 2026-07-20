@@ -212,8 +212,12 @@ export interface WorkerInfo {
 }
 
 export interface Envelope {
-  type: "entry" | "stats" | "hello" | "filter" | "filterError";
+  type: "entry" | "entryBatch" | "stats" | "hello" | "filter" | "filterError";
   entry?: Entry;
+  // entryBatch: several entries in one frame, oldest first — semantically the
+  // same as that many "entry" frames in order (the hub coalesces the live
+  // feed and history replay to cut frame count).
+  entries?: Entry[];
   stats?: Stats;
   filter?: string;
   error?: string;

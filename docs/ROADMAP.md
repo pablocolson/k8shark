@@ -376,12 +376,41 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   `TestSinkConnectsWSSWithCustomCA` (sink_test.go, vrai serveur WS TLS) ;
   `go test -race ./...` (238 tests) propre.
 
-Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
+**Backlog, lot 9 — HUB-4, batching du fan-out WebSocket et cache des
+marshals :**
+
+- **HUB-4** : nouveau type de frame `MsgEntryBatch` (`Envelope.Entries`,
+  additif) — le store marshale chaque entrée exactement une fois dans
+  `add()` (après attribution du Seq, l'entrée étant immuable ensuite) et
+  garde les octets dans un ring `raw` parallèle ; `broadcast` accumule les
+  entrées dans une fenêtre de 30 ms (`time.AfterFunc` one-shot armé par la
+  première entrée — aucun ticker permanent, le handler reste testable sans
+  boucle de fond) puis `flushBroadcast` envoie à chaque client front UNE
+  frame batch avec le sous-ensemble filtré, assemblée par concaténation des
+  JSON pré-marshalés (`assembleBatch`, zéro re-marshal) ; `replayHistory`
+  passe aussi sur le cache (`store.recentRaw`) en frames de 100 entrées,
+  ordre chronologique strict inter- et intra-frame. Front : `useHub.ts`
+  traite `entryBatch` par le même chemin buffer/pause que `entry`
+  (conservé), `types.ts` étendu. Drops comptés par entrée (unité de
+  `broadcastDropped` inchangée). Bench mis à jour (flush forcé,
+  déterministe) ; le gain principal — frames/syscalls divisés par la
+  taille de batch — n'apparaît que sur de vraies sockets.
+
+  Vérifié en conditions réelles (hub + worker démo à 200 rps, sonde WS Go
+  réelle) au 2026-07-20 : 1032 entrées reçues en 91 frames `entryBatch`
+  (~11 entrées/frame, contre 1032 frames avant), JSON de chaque frame
+  valide, stats intercalées normalement. Tests :
+  `TestReplayHistoryChunksChronological`, `TestE2EReplayArrivesAsBatches`,
+  e2e round-trip adapté aux batches, nouveau test vitest `entryBatch` ;
+  `go test -race ./...` (240 tests) et `tsc -b`/`vitest run` (94
+  tests)/`npm run build` propres.
+
+Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-6,
 UI-7/8/11, MCP-1/4, OPS-6/7/10, TST-5/8,
 EXT-2/3/4/5.
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
 Prochain chantier logique : d'autres items S/M de ce backlog (MCP-1/MCP-4
-étendent l'outillage agent, HUB-4 le débit du fan-out, TST-5 le lint),
+étendent l'outillage agent, TST-5 le lint, HUB-6 l'enrichissement k8s),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
