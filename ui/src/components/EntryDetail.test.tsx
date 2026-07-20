@@ -33,6 +33,7 @@ const httpEntry: Entry = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
 });
 
 describe("EntryDetail", () => {
@@ -144,5 +145,26 @@ describe("EntryDetail", () => {
     const noBody: Entry = { ...httpEntry, request: { ...httpEntry.request, }, response: { ...httpEntry.response, body: undefined } };
     render(<EntryDetail entry={noBody} onClose={vi.fn()} />);
     expect(screen.queryByRole("tab", { name: "body" })).not.toBeInTheDocument();
+  });
+
+  // UI-11: resizable panel.
+  it("restores the persisted width and resets it (with localStorage) on handle double-click", async () => {
+    localStorage.setItem("k8shark.detailWidth", "600");
+    const { container, unmount } = render(<EntryDetail entry={httpEntry} onClose={vi.fn()} />);
+    const panel = container.querySelector(".detail") as HTMLElement;
+    expect(panel.style.width).toBe("600px");
+
+    const handle = container.querySelector(".detail-resize") as HTMLElement;
+    await userEvent.dblClick(handle);
+    expect(panel.style.width).toBe("440px");
+    expect(localStorage.getItem("k8shark.detailWidth")).toBe("440");
+    unmount();
+  });
+
+  it("clamps a persisted width below the minimum back up to 320", () => {
+    localStorage.setItem("k8shark.detailWidth", "50");
+    const { container } = render(<EntryDetail entry={httpEntry} onClose={vi.fn()} />);
+    const panel = container.querySelector(".detail") as HTMLElement;
+    expect(panel.style.width).toBe("320px");
   });
 });

@@ -1,10 +1,71 @@
-import type { KeyboardEvent, ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { curlCommand } from "../curl";
 import { conversationClause, endpointClause } from "../iflClause";
 import type { Entry, L4Info, Payload, PGColumn, RawView } from "../types";
 
 type TabId = "overview" | "request" | "response" | "headers" | "body" | "raw" | "l4";
+
+// UI-11: the detail panel width is user-resizable and persisted, like the
+// column selection (VISIBLE_COLUMNS_KEY). DEFAULT matches the old fixed width.
+const DETAIL_WIDTH_KEY = "k8shark.detailWidth";
+const DETAIL_WIDTH_DEFAULT = 440;
+const DETAIL_WIDTH_MIN = 320;
+
+function detailWidthMax(): number {
+  return Math.round((typeof window !== "undefined" ? window.innerWidth : 1200) * 0.7);
+}
+
+function clampDetailWidth(w: number): number {
+  return Math.max(DETAIL_WIDTH_MIN, Math.min(w, detailWidthMax()));
+}
+
+// usePanelWidth holds the persisted, drag-resizable panel width. The returned
+// onResizeStart drives a pointer-capture drag on the panel's left edge (drag
+// left = wider); onReset restores the default (bound to a double-click).
+function usePanelWidth(): {
+  width: number;
+  onResizeStart: (e: ReactPointerEvent) => void;
+  onReset: () => void;
+} {
+  const [width, setWidth] = useState<number>(() => {
+    const raw = typeof localStorage !== "undefined" && localStorage.getItem(DETAIL_WIDTH_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) ? clampDetailWidth(parsed) : DETAIL_WIDTH_DEFAULT;
+  });
+
+  const persist = useCallback((w: number) => {
+    setWidth(w);
+    try {
+      localStorage.setItem(DETAIL_WIDTH_KEY, String(w));
+    } catch {
+      // storage unavailable (private mode / quota) — keep the in-memory width
+    }
+  }, []);
+
+  const onResizeStart = useCallback(
+    (e: ReactPointerEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = width;
+      const target = e.currentTarget as HTMLElement;
+      target.setPointerCapture?.(e.pointerId);
+      const onMove = (ev: PointerEvent) => persist(clampDetailWidth(startWidth + (startX - ev.clientX)));
+      const onUp = (ev: PointerEvent) => {
+        target.releasePointerCapture?.(ev.pointerId);
+        target.removeEventListener("pointermove", onMove);
+        target.removeEventListener("pointerup", onUp);
+      };
+      target.addEventListener("pointermove", onMove);
+      target.addEventListener("pointerup", onUp);
+    },
+    [width, persist]
+  );
+
+  const onReset = useCallback(() => persist(DETAIL_WIDTH_DEFAULT), [persist]);
+
+  return { width, onResizeStart, onReset };
+}
 
 export function EntryDetail({
   entry,
@@ -18,6 +79,7 @@ export function EntryDetail({
   const tabs = useMemo(() => visibleTabs(entry), [entry]);
   const [tab, setTab] = useState<TabId>("overview");
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
+  const { width, onResizeStart, onReset } = usePanelWidth();
 
   // Reset to Overview when switching entries so we never land on a now-empty tab.
   useEffect(() => setTab("overview"), [entry.id]);
@@ -40,7 +102,16 @@ export function EntryDetail({
   };
 
   return (
-    <aside className="detail">
+    <aside className="detail" style={{ width }}>
+      <div
+        className="detail-resize"
+        onPointerDown={onResizeStart}
+        onDoubleClick={onReset}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="resize detail panel (double-click to reset)"
+        title="drag to resize · double-click to reset"
+      />
       <div className="detail-head">
         <span className={`proto-badge big st-${entry.status}`}>{entry.protocol}</span>
         <span className="detail-title mono">{entry.request.summary}</span>

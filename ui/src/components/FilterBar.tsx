@@ -64,8 +64,8 @@ interface Props {
   pausedCount: number;
   onTogglePause: () => void;
   onClear: () => void;
-  view: "list" | "map";
-  onViewChange: (v: "list" | "map") => void;
+  view: "list" | "map" | "top";
+  onViewChange: (v: "list" | "map" | "top") => void;
   count: number;
   truncated: boolean;
   filterError: string | null;
@@ -322,6 +322,9 @@ export function FilterBar({
           </button>
           <button className={view === "map" ? "active" : ""} onClick={() => onViewChange("map")}>
             Map
+          </button>
+          <button className={view === "top" ? "active" : ""} onClick={() => onViewChange("top")}>
+            Top
           </button>
         </div>
         <ExportMenu entries={entries} />

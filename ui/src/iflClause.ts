@@ -22,3 +22,25 @@ export function conversationClause(src: Locatable, dst: Locatable): string {
   if (src.name && dst.name) return `src.name == "${src.name}" and dst.name == "${dst.name}"`;
   return `src.ip == "${src.ip}" and dst.ip == "${dst.ip}"`;
 }
+
+// groupClause pivots the Top view's aggregated rows back to matching traffic,
+// keyed on the group-by field. A namespace key is a plain name; a workload key
+// is the hub's "namespace/workload" node label (see nodeLabel in graph.go), so
+// it splits into a namespace-scoped workload match on either endpoint. When a
+// workload key has no namespace prefix (the label fell back to a bare
+// name/IP), it matches the workload field alone.
+export function groupClause(groupBy: "workload" | "namespace", key: string): string {
+  if (groupBy === "namespace") {
+    return `src.namespace == "${key}" or dst.namespace == "${key}"`;
+  }
+  const slash = key.indexOf("/");
+  if (slash < 0) {
+    return `src.workload == "${key}" or dst.workload == "${key}"`;
+  }
+  const ns = key.slice(0, slash);
+  const wl = key.slice(slash + 1);
+  return (
+    `(src.namespace == "${ns}" and src.workload == "${wl}") or ` +
+    `(dst.namespace == "${ns}" and dst.workload == "${wl}")`
+  );
+}

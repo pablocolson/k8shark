@@ -194,6 +194,21 @@ export interface TimelineBucket {
   warnings: number;
 }
 
+// GroupSummary is one row of GET /api/summary: the buffered traffic
+// aggregated over one value of the group-by key (mirrors hub summary.go).
+export interface GroupSummary {
+  key: string;
+  count: number;
+  errors: number;
+  warnings: number;
+  protocols?: string[];
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
 // WorkerInfo is one row of GET /api/workers.
 export interface WorkerInfo {
   node: string;

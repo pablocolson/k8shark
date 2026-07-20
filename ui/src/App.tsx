@@ -6,11 +6,18 @@ import { Timeline } from "./components/Timeline";
 import { TrafficTable } from "./components/TrafficTable";
 import { EntryDetail } from "./components/EntryDetail";
 import { ServiceMap } from "./components/ServiceMap";
+import { TopView } from "./components/TopView";
 import { CompareView } from "./components/CompareView";
 import { isTypingTarget } from "./dom";
 import type { Entry } from "./types";
 
-type View = "list" | "map";
+type View = "list" | "map" | "top";
+
+// parseView maps the ?view= query param to a View, defaulting to the list.
+function parseView(search: string): View {
+  const v = new URLSearchParams(search).get("view");
+  return v === "map" || v === "top" ? v : "list";
+}
 
 const PROTO_CLAUSE_RE = /\bprotocol\s*==\s*"?([\w.-]+)"?/i;
 const STATUS_CLAUSE_RE = /\bstatus\s*==\s*"?([\w.-]+)"?/i;
@@ -46,9 +53,7 @@ export function App() {
   const hub = useHub(filter);
   const { paused, setPaused } = hub;
   const [selected, setSelected] = useState<Entry | null>(null);
-  const [view, setView] = useState<View>(() =>
-    new URLSearchParams(location.search).get("view") === "map" ? "map" : "list"
-  );
+  const [view, setView] = useState<View>(() => parseView(location.search));
   const [pinned, setPinned] = useState<Entry[]>([]);
   const [showCompare, setShowCompare] = useState(false);
 
@@ -179,11 +184,21 @@ export function App() {
             <CompareView a={pinned[0]} b={pinned[1]} onClose={() => setShowCompare(false)} />
           )}
         </div>
-      ) : (
+      ) : view === "map" ? (
         <div className="main">
           <ServiceMap
             entries={hub.entries}
             onNodeClick={(clause) => {
+              onApply(clause);
+              setView("list");
+            }}
+          />
+        </div>
+      ) : (
+        <div className="main">
+          <TopView
+            filter={filter}
+            onApply={(clause) => {
               onApply(clause);
               setView("list");
             }}

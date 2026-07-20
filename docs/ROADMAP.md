@@ -461,12 +461,36 @@ marshals :**
   (253 tests) propres, `helm lint` propre, endpoints/outils testés en réel
   contre un hub+worker démo.
 
+**Backlog, lot 11 — front (UI-7, UI-11) :**
+
+- **UI-7** : troisième onglet « Top » (List | Map | Top dans la FilterBar) —
+  table triable des top talkers (`ui/src/components/TopView.tsx`) alimentée
+  par un hook de polling `useSummary` (`GET /api/summary`, fenêtre 5 s,
+  suit le filtre actif), sélecteur workload/namespace, tri par
+  appels/taux d'erreur/p50/p95, clic sur une ligne applique la clause IFL
+  correspondante (`groupClause` dans `iflClause.ts` : namespace simple, ou
+  workload namespacé décomposé en `(src.namespace==ns and
+  src.workload==wl) or (dst...)`) et revient à la liste — même pattern que
+  `onNodeClick` de ServiceMap.
+- **UI-11** : panneau `EntryDetail` redimensionnable — poignée de drag sur
+  la bordure gauche (`usePanelWidth`, pointer-capture, drag vers la gauche =
+  plus large), largeur bornée [320, 70vw] et persistée en `localStorage`
+  (`k8shark.detailWidth`, comme `VISIBLE_COLUMNS_KEY`), double-clic pour
+  revenir au défaut (440 px). `role="separator"` + aria-label.
+
+  Vérifié au 2026-07-20 : `tsc -b`/`vitest run` (100 tests, +6 :
+  `TopView.test.tsx` rendu/filtre/clic/tri, `EntryDetail` reset+clamp de
+  largeur)/`npm run build` propres, hub sert bien le bundle rebâti sur
+  `/`. Contrôle navigateur direct indisponible (extension Chrome non
+  connectée) — logique couverte par les tests jsdom et la forme de
+  `/api/summary` vérifiée en réel.
+
 Reste du backlog hors Phase 3 : CAP-7/8, DIS-6/8/10/11, HUB-6,
-UI-7/8/11, MCP-1, OPS-6/10, TST-5/8,
+UI-8, MCP-1, OPS-6/10, TST-5/8,
 EXT-2/3/4/5.
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : finir UI-7/11 (vue Top + panneau redimensionnable,
-en cours), puis MCP-1 (export PCAP), TST-5 (lint), HUB-6 (watch k8s),
+Prochain chantier logique : MCP-1 (export PCAP), TST-5 (lint Go + eslint),
+HUB-6 (watch k8s incrémental), UI-8 (perf table à fort volume),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
