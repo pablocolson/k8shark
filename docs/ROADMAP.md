@@ -145,9 +145,64 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   vet`/`go build`/`go test ./...` et côté UI `tsc -b`/`vitest run` (89
   tests)/`npm run build`, tous propres.
 
-Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-3/4/6,
-UI-5/6/7/8/10/11, MCP-1/4/5/6/7/8, OPS-6/7/8/9/10, SEC-5/6/7/8/9,
-TST-2/3/5/6/7/8, EXT-2/3/4/5.
+**Backlog, lot 2 — 8 items traités (commits `ffd8ecc`, `75117bc`, `72b3416`,
+`99a792c`) :**
+
+- **HUB-3** : `recentBefore` exige que l'entrée-ancre soit encore dans le
+  ring pour localiser le point de départ ; `Entry.Seq` (nouveau champ
+  additif, compteur monotone posé par `store.add`) permet à
+  `?before_seq=` de comparer directement au lieu de chercher une
+  correspondance, donc la pagination continue de fonctionner même une
+  fois l'ancre elle-même évincée. `useHub.loadOlder` s'ancre désormais sur
+  `before_seq` quand disponible, repli sur `before` (ID) sinon.
+- **UI-5** : cartes source/destination d'`EntryDetail` cliquables — « filtrer
+  sur cette source/destination » (`endpointClause`, extrait du `nodeClause`
+  inline de `ServiceMap.tsx` vers `ui/src/iflClause.ts` partagé) et la
+  flèche devient « suivre cette conversation » (`conversationClause`, paire
+  src/dst exacte).
+- **UI-6** : historique des filtres appliqués via la FilterBar (Enter/Apply
+  ou une chip EXAMPLES), persisté en `localStorage` (dédupliqué, plafonné à
+  10), proposé en tête du dropdown quand l'input est vide et focus.
+- **UI-10** : `role="alert"` sur la bannière d'erreur de filtre,
+  `aria-live="polite"` sur le compteur « N shown » et l'indicateur de
+  connexion, texte sr-only « copied to clipboard » sur `CopyButton`/
+  `CurlButton` (leur `aria-label` est statique et n'annonçait pas le
+  changement d'état).
+- **MCP-5** : `list_entries` gagne un argument `before_seq` (branché sur le
+  `?before_seq=` du hub) et chaque enregistrement expose son `seq` ; une
+  page pleine se termine par un hint explicite « next page: call again with
+  before_seq=N ». Toute sortie d'outil est désormais plafonnée à 100 Ko
+  (troncature UTF-8-safe + notice explicite), appliqué une fois dans
+  `callTool` donc valable pour tous les outils uniformément.
+- **MCP-7** : `initialize` renvoie un champ `instructions` (ordre
+  d'investigation recommandé), chaque outil est annoté
+  `annotations.readOnlyHint` (`true` sauf `start_pcap`).
+- **OPS-8** : `image.pullPolicy` vide par défaut, résolu par un nouveau
+  helper `k8shark.imagePullPolicy` : `Always` pour un tag `latest`/vide,
+  `IfNotPresent` pour un tag épinglé — le footgun était déjà documenté en
+  commentaire mais toujours livré tel quel.
+- **OPS-9** : annotations `prometheus.io/scrape|port|path` par défaut sur le
+  pod du hub, plus un `ServiceMonitor` optionnel
+  (`metrics.serviceMonitor.enabled`) gardé par une vérification de la CRD
+  `monitoring.coreos.com/v1`, avec échec explicite (comme le garde-fou
+  `hub.replicas > 1` existant) plutôt qu'un no-op silencieux si activé sans
+  prometheus-operator.
+
+  Vérifié en conditions réelles (`make dev` + navigateur headless, CLI MCP
+  stdio réelle) au 2026-07-20 : pagination `before_seq` confirmée via curl,
+  boutons de filtre par endpoint et « follow conversation » produisant les
+  bonnes clauses IFL, historique de filtres offert et ré-appliqué,
+  `initialize`/`tools/list`/`list_entries` de l'outil MCP réel confirmant
+  instructions, `readOnlyHint`, `seq`, hint de pagination et troncature à
+  100 Ko (343 Ko → 100 Ko + notice). `helm lint` non disponible dans ce
+  sandbox (accès réseau bloqué par la politique d'egress) — syntaxe des
+  templates relue à la main, CI fera foi. Côté Go : `gofmt`/`go vet`/`go
+  build`/`go test ./...` ; côté UI : `tsc -b`/`vitest run` (93 tests)/`npm
+  run build`, tous propres.
+
+Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
+UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/6/7/8/9, TST-2/3/5/6/7/8,
+EXT-2/3/4/5.
 Prochain chantier logique : d'autres items S/M de ce backlog, ou le démarrage
 de la **Phase 3** (gros chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls,
 HUB-1 persistance, EXT-1 tap targeting, OPS-2/OPS-3 release automatisée +
