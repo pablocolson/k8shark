@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pablocolson/k8shark/pkg/api"
@@ -49,6 +50,12 @@ type resolver struct {
 
 	mu   sync.RWMutex
 	byIP map[string]ref
+
+	// refreshFailures counts refresh() cycles that gave up without updating
+	// byIP (a failed/partial API call — see refresh), exposed via /metrics so
+	// a broken RBAC binding shows up as a rising counter instead of silently
+	// stale enrichment.
+	refreshFailures atomic.Int64
 }
 
 func newResolver(log *slog.Logger) *resolver {
@@ -76,6 +83,10 @@ func newResolver(log *slog.Logger) *resolver {
 
 func (r *resolver) enabled() bool { return r.client != nil }
 
+// failures returns the count of refresh cycles that gave up without updating
+// byIP, since process start.
+func (r *resolver) failures() int64 { return r.refreshFailures.Load() }
+
 // run rebuilds the IP map every enrichInterval until ctx is cancelled. A no-op
 // when the resolver is disabled (not in a cluster).
 func (r *resolver) run(ctx context.Context) {
@@ -102,6 +113,7 @@ func (r *resolver) run(ctx context.Context) {
 func (r *resolver) refresh(ctx context.Context) {
 	m := r.listPods(ctx, r.listReplicaSetOwners(ctx))
 	if m == nil {
+		r.refreshFailures.Add(1)
 		return // request failed; keep the previous map
 	}
 	// Services fill ClusterIP gaps; pods win on any overlap (disjoint in practice).

@@ -164,8 +164,12 @@ const (
 )
 
 // fieldCounter holds observed value counts for a single tracked field. It has
-// no mutex of its own -- callers hold the parent facetIndex's mu.
+// no mutex of its own -- callers hold the parent facetIndex's mu. get is
+// resolved once at construction (see newFacetIndex) rather than looked up by
+// name on every observed entry, since fieldGetter's switch would otherwise be
+// re-traversed (and a fresh closure allocated) ~45 times per entry ingested.
 type fieldCounter struct {
+	get    func(*api.Entry) string
 	counts map[string]int64
 }
 
@@ -195,36 +199,98 @@ func (fc *fieldCounter) increment(v string) {
 type facetIndex struct {
 	mu     sync.Mutex
 	fields map[string]*fieldCounter // canonical field name -> counter (TrackValues fields only)
+
+	// requestHeaderNames/responseHeaderNames track distinct HTTP header keys
+	// observed on each side, powering request.header.<name>/
+	// response.header.<name> field-*name* autocomplete (DIS-12): unlike
+	// fields above, a single entry can contribute many keys at once and
+	// there's no fixed catalog entry to key on (the header name is
+	// open-ended), so these live outside the fields map and are surfaced
+	// separately -- see headerFieldNames, consumed by handleFields.
+	requestHeaderNames  *fieldCounter
+	responseHeaderNames *fieldCounter
 }
 
 // newFacetIndex builds an index pre-populated with one counter per
-// TrackValues==true entry in fieldCatalog.
+// TrackValues==true entry in fieldCatalog, each holding its resolved
+// fieldGetter so observe() never has to look one up by name again.
 func newFacetIndex() *facetIndex {
-	f := &facetIndex{fields: make(map[string]*fieldCounter)}
+	f := &facetIndex{
+		fields:              make(map[string]*fieldCounter),
+		requestHeaderNames:  &fieldCounter{counts: map[string]int64{}},
+		responseHeaderNames: &fieldCounter{counts: map[string]int64{}},
+	}
 	for _, spec := range fieldCatalog {
-		if spec.TrackValues {
-			f.fields[spec.Name] = &fieldCounter{counts: map[string]int64{}}
+		if !spec.TrackValues {
+			continue
 		}
+		get := fieldGetter(spec.Name)
+		if get == nil {
+			continue // catalog/getter drift — never panic the ingest path
+		}
+		f.fields[spec.Name] = &fieldCounter{get: get, counts: map[string]int64{}}
 	}
 	return f
 }
 
-// observe records one entry's tracked field values. Reuses fieldGetter from
-// filter.go for value extraction -- no duplicated field-accessor logic.
+// observe records one entry's tracked field values, using each counter's
+// getter resolved once at construction (see newFacetIndex) -- no duplicated
+// field-accessor logic and no per-entry, per-field lookup into filter.go's
+// fieldGetter switch. It also records any HTTP header keys present, for
+// headerFieldNames.
 func (f *facetIndex) observe(e *api.Entry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for name, fc := range f.fields {
-		get := fieldGetter(name)
-		if get == nil {
-			continue // catalog/getter drift — never panic the ingest path
-		}
-		v := get(e)
+	for _, fc := range f.fields {
+		v := fc.get(e)
 		if v == "" {
 			continue
 		}
 		fc.increment(v)
 	}
+	for name := range e.Request.Headers {
+		f.requestHeaderNames.increment(name)
+	}
+	for name := range e.Response.Headers {
+		f.responseHeaderNames.increment(name)
+	}
+}
+
+// headerFieldNames returns the observed request/response header keys
+// (bounded to facetTrackCap distinct keys per side, same as any other
+// tracked field), sorted by occurrence count descending then name ascending.
+// handleFields turns each into a synthetic "request.header.<name>" /
+// "response.header.<name>" catalog entry so the front's field-name
+// autocomplete can offer them, even though they aren't in the static
+// fieldCatalog.
+func (f *facetIndex) headerFieldNames() (req, resp []string) {
+	f.mu.Lock()
+	reqVals := countsToFieldValues(f.requestHeaderNames.counts)
+	respVals := countsToFieldValues(f.responseHeaderNames.counts)
+	f.mu.Unlock()
+
+	sortFieldValues(reqVals)
+	sortFieldValues(respVals)
+	return fieldValueNames(reqVals), fieldValueNames(respVals)
+}
+
+// countsToFieldValues copies a counts map into a FieldValue slice. Caller
+// holds facetIndex.mu.
+func countsToFieldValues(counts map[string]int64) []FieldValue {
+	out := make([]FieldValue, 0, len(counts))
+	for v, c := range counts {
+		out = append(out, FieldValue{Value: v, Count: c})
+	}
+	return out
+}
+
+// fieldValueNames extracts just the Value of each FieldValue, preserving order.
+func fieldValueNames(vals []FieldValue) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = v.Value
+	}
+	return out
 }
 
 // values returns field's observed values matching prefix (case-insensitive

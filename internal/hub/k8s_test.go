@@ -1,7 +1,10 @@
 package hub
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/pablocolson/k8shark/pkg/api"
@@ -72,6 +75,31 @@ func TestResolverEnrichWorkload(t *testing.T) {
 	// Name already set (worker-supplied) still gains the workload.
 	if e.Destination.Name != "keep" || e.Destination.Workload != "web" {
 		t.Errorf("dest = %q/%q, want keep/web", e.Destination.Name, e.Destination.Workload)
+	}
+}
+
+// A failed refresh (e.g. broken RBAC returning 403) is counted via failures(),
+// exposed as k8shark_hub_k8s_enrich_failures_total, without blanking the
+// previously resolved map.
+func TestResolverRefreshFailureCounted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	r := &resolver{
+		log:    slog.Default(),
+		client: srv.Client(),
+		api:    srv.URL,
+		token:  "x",
+		byIP:   map[string]ref{"10.0.0.1": {name: "keep"}},
+	}
+	r.refresh(context.Background())
+	if got := r.failures(); got != 1 {
+		t.Fatalf("failures() = %d, want 1", got)
+	}
+	if r.byIP["10.0.0.1"].name != "keep" {
+		t.Error("a failed refresh must not blank the previous enrichment map")
 	}
 }
 

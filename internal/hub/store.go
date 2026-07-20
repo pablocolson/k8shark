@@ -154,6 +154,18 @@ func (s *store) get(id string) *api.Entry {
 	return s.byID[id]
 }
 
+// size returns how many ring buffer slots are currently filled (0..capacity)
+// -- the buffer's fill level, exposed via /metrics so an operator can tell how
+// much history depth the buffer is actually holding under the current load.
+func (s *store) size() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.full {
+		return s.capacity
+	}
+	return s.next
+}
+
 // stats snapshots the current aggregates. workers is supplied by the caller
 // since worker connections are tracked by the server, not the store.
 func (s *store) stats(workers int) api.Stats {

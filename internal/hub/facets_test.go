@@ -132,6 +132,35 @@ func TestFacetIndexPrefixCaseInsensitive(t *testing.T) {
 	}
 }
 
+// headerFieldNames tracks distinct header keys per side (not values), sorted
+// by occurrence count, so handleFields can offer request.header.<name>/
+// response.header.<name> as autocompletable field names.
+func TestFacetIndexHeaderFieldNames(t *testing.T) {
+	f := newFacetIndex()
+	f.observe(&api.Entry{Request: api.Payload{Headers: map[string]string{"x-request-id": "1", "content-type": "json"}}})
+	f.observe(&api.Entry{
+		Request:  api.Payload{Headers: map[string]string{"x-request-id": "2"}},
+		Response: api.Payload{Headers: map[string]string{"server": "nginx"}},
+	})
+
+	req, resp := f.headerFieldNames()
+	reqSet := map[string]bool{}
+	for _, n := range req {
+		reqSet[n] = true
+	}
+	if !reqSet["x-request-id"] || !reqSet["content-type"] {
+		t.Errorf("request header names = %v, want x-request-id and content-type", req)
+	}
+	if len(resp) != 1 || resp[0] != "server" {
+		t.Errorf("response header names = %v, want just [server]", resp)
+	}
+	// x-request-id was seen on both entries, content-type on only one, so it
+	// must sort first (count descending).
+	if req[0] != "x-request-id" {
+		t.Errorf("req[0] = %q, want x-request-id (higher count)", req[0])
+	}
+}
+
 func TestFacetIndexSnapshotOmitsFreetextAndCapsTopN(t *testing.T) {
 	f := newFacetIndex()
 	f.observe(sample())
@@ -255,5 +284,48 @@ func TestFreshStoreStillOffersStaticEnumValues(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("expected protocol values to include %q even with no traffic, got %+v", want, proto.Values)
 		}
+	}
+}
+
+// /api/fields must surface observed header keys as synthetic
+// request.header.<name>/response.header.<name> entries (DIS-12), with no
+// value list (header values are freetext), alongside the static catalog.
+func TestHandleFieldsIncludesObservedHeaderNames(t *testing.T) {
+	srv := New(discardLogger(), Options{})
+	srv.store.add(&api.Entry{
+		ID:       "x",
+		Protocol: api.ProtocolHTTP,
+		Request:  api.Payload{Headers: map[string]string{"x-request-id": "abc"}},
+		Response: api.Payload{Headers: map[string]string{"server": "nginx"}},
+	})
+
+	rec := httptest.NewRecorder()
+	srv.handleFields(rec, httptest.NewRequest(http.MethodGet, "/api/fields", nil))
+
+	var body struct {
+		Fields []fieldMeta `json:"fields"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	byName := map[string]fieldMeta{}
+	for _, fm := range body.Fields {
+		byName[fm.Name] = fm
+	}
+
+	reqField, ok := byName["request.header.x-request-id"]
+	if !ok {
+		t.Fatalf("request.header.x-request-id missing from /api/fields, got %+v", byName)
+	}
+	if reqField.Type != FieldTypeString || len(reqField.Values) != 0 {
+		t.Errorf("request.header.x-request-id = %+v, want string type with no value list", reqField)
+	}
+	if _, ok := byName["response.header.server"]; !ok {
+		t.Errorf("response.header.server missing from /api/fields, got %+v", byName)
+	}
+	// A header only ever seen on the request side must not also appear on the
+	// response side (and vice versa).
+	if _, ok := byName["response.header.x-request-id"]; ok {
+		t.Error("response.header.x-request-id should not exist (that header was only ever on the request side)")
 	}
 }

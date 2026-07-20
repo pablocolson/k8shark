@@ -233,6 +233,43 @@ func TestCompileFilterAMQP(t *testing.T) {
 	}
 }
 
+// request.header.<name>/response.header.<name> resolve against the already-
+// captured (and lowercased, per flattenHeaders) Payload.Headers map, matching
+// case-insensitively on the field name itself same as any other field; a bare
+// prefix with no header name is an unknown field, not a match-nothing.
+func TestHTTPHeaderFilterFields(t *testing.T) {
+	e := &api.Entry{
+		Protocol: api.ProtocolHTTP,
+		Request:  api.Payload{Headers: map[string]string{"x-request-id": "abc-123", "content-type": "application/json"}},
+		Response: api.Payload{Headers: map[string]string{"content-type": "application/json", "server": "nginx"}},
+	}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`request.header.x-request-id == "abc-123"`, true},
+		{`request.header.X-Request-Id == "abc-123"`, true}, // field name is case-insensitive
+		{`request.header.x-request-id == "other"`, false},
+		{`request.header.content-type contains "json"`, true},
+		{`response.header.server == "nginx"`, true},
+		{`response.header.x-request-id == "abc-123"`, false}, // request-only header, not on response
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	if _, err := CompileFilter(`request.header. == "x"`); err == nil {
+		t.Error(`"request.header." with no name should be a compile error, not a silent match-nothing`)
+	}
+}
+
 // Numeric L4 fields must not spuriously match when L4 is absent (missing => ""
 // not "0").
 func TestL4FieldMissingIsEmpty(t *testing.T) {

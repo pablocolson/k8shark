@@ -71,6 +71,15 @@ type Server struct {
 // sparkline without unbounded growth.
 const statsHistoryCap = 300
 
+// workerGCTTL bounds how long a disconnected worker's row survives in the
+// registry after it was last seen. Without this, an autoscaling or spot-node
+// cluster that churns through node names accumulates stale rows (and their
+// per-node Prometheus series) in /api/workers forever. A currently-connected
+// worker is never pruned regardless of LastSeen; the window is kept
+// generous enough that "the worker was here, went away N minutes ago" stays
+// answerable during an incident.
+const workerGCTTL = time.Hour
+
 // New builds a hub.
 func New(log *slog.Logger, opts Options) *Server {
 	size := opts.BufferSize
@@ -340,6 +349,20 @@ func (s *Server) workerUpdate(node string, fn func(*workerInfo)) {
 	s.wmu.Unlock()
 }
 
+// gcWorkers removes registry rows for workers disconnected for more than
+// workerGCTTL. Called periodically from statsLoop, which already runs a 2s
+// ticker on the hub's lifetime.
+func (s *Server) gcWorkers() {
+	cutoff := time.Now().Add(-workerGCTTL)
+	s.wmu.Lock()
+	for node, wi := range s.workers {
+		if !wi.Connected && wi.LastSeen.Before(cutoff) {
+			delete(s.workers, node)
+		}
+	}
+	s.wmu.Unlock()
+}
+
 // workerSnapshot copies the registry, sorted by node name.
 func (s *Server) workerSnapshot() []workerInfo {
 	s.wmu.Lock()
@@ -539,6 +562,7 @@ func (s *Server) statsLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		s.gcWorkers()
 		st := s.statsSnapshot()
 		s.recordStatsPoint(st)
 		b := s.marshalStats(st)
@@ -598,11 +622,40 @@ func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	if sortField := r.URL.Query().Get("sort"); sortField != "" {
+		desc, err := sortOrder(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !validSortField(sortField) {
+			http.Error(w, "unknown or non-numeric sort field: "+sortField, http.StatusBadRequest)
+			return
+		}
+		matched := s.store.recent(s.store.capacity, pred)
+		writeJSON(w, topNBySort(matched, fieldGetter(sortField), desc, limit))
+		return
+	}
+
 	if before := r.URL.Query().Get("before"); before != "" {
 		writeJSON(w, s.store.recentBefore(before, limit, pred))
 		return
 	}
 	writeJSON(w, s.store.recent(limit, pred))
+}
+
+// sortOrder parses ?order=asc|desc for handleEntries' ?sort=, defaulting to
+// desc (the common "biggest/slowest first" case) when order is omitted.
+func sortOrder(r *http.Request) (desc bool, err error) {
+	switch v := r.URL.Query().Get("order"); v {
+	case "", "desc":
+		return true, nil
+	case "asc":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid order %q (want asc or desc)", v)
+	}
 }
 
 // queryPredicate compiles the shared ?filter=&since=&until= query params into
@@ -659,6 +712,17 @@ func parseTimeParam(v string) (time.Time, error) {
 		return time.Now().Add(-d), nil
 	}
 	return time.Time{}, fmt.Errorf("want RFC3339, unix seconds, or a duration like 15m: %q", v)
+}
+
+// sortedKeys returns m's keys sorted ascending, for deterministic /metrics
+// output ordering.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func clampInt(n, lo, hi int) int {
@@ -794,6 +858,29 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"Currently connected workers.", strconv.Itoa(st.Workers))
 	metric("k8shark_hub_broadcast_dropped_total", "counter",
 		"Entries dropped to slow front clients.", strconv.FormatInt(dropped, 10))
+	metric("k8shark_hub_entries_per_sec", "gauge",
+		"Entries ingested per second, trailing 5s window.", strconv.FormatFloat(st.EntriesPerSec, 'f', -1, 64))
+	metric("k8shark_hub_buffer_entries", "gauge",
+		"Ring buffer slots currently filled.", strconv.Itoa(s.store.size()))
+	metric("k8shark_hub_buffer_capacity", "gauge",
+		"Ring buffer capacity (max entries retained).", strconv.Itoa(s.store.capacity))
+	metric("k8shark_hub_k8s_enrich_failures_total", "counter",
+		"Failed k8s enrichment refresh cycles (e.g. broken RBAC).", strconv.FormatInt(s.resolver.failures(), 10))
+
+	if len(st.ByProtocol) > 0 {
+		fmt.Fprintf(&b, "# HELP k8shark_hub_entries_by_protocol_total Entries ingested, by protocol.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_hub_entries_by_protocol_total counter\n")
+		for _, proto := range sortedKeys(st.ByProtocol) {
+			fmt.Fprintf(&b, "k8shark_hub_entries_by_protocol_total{protocol=%q} %d\n", proto, st.ByProtocol[proto])
+		}
+	}
+	if len(st.ByStatus) > 0 {
+		fmt.Fprintf(&b, "# HELP k8shark_hub_entries_by_status_total Entries ingested, by normalised status.\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_hub_entries_by_status_total counter\n")
+		for _, status := range sortedKeys(st.ByStatus) {
+			fmt.Fprintf(&b, "k8shark_hub_entries_by_status_total{status=%q} %d\n", status, st.ByStatus[status])
+		}
+	}
 
 	// Per-worker series, from the registry (self-reported drops make silent
 	// capture loss visible to alerting).
@@ -854,6 +941,17 @@ func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 			fm.Values = s.fieldValuesFor(spec, "", facetTopN)
 		}
 		out = append(out, fm)
+	}
+	// Header field names are dynamic (any header key can appear) so they
+	// aren't in the static fieldCatalog above; append one synthetic entry per
+	// observed key instead, with no value list (header values are
+	// effectively freetext -- see DIS-12).
+	reqHeaders, respHeaders := s.store.facets.headerFieldNames()
+	for _, h := range reqHeaders {
+		out = append(out, fieldMeta{Name: "request.header." + h, Type: FieldTypeString, Operators: opsString})
+	}
+	for _, h := range respHeaders {
+		out = append(out, fieldMeta{Name: "response.header." + h, Type: FieldTypeString, Operators: opsString})
 	}
 	writeJSON(w, map[string]any{"fields": out})
 }

@@ -419,7 +419,22 @@ func compare(actual, op, want string) bool {
 // fieldGetter resolves a dotted field path to an accessor. Unknown fields
 // return nil (rejected at filter compile; skipped by the facet index).
 func fieldGetter(field string) func(*api.Entry) string {
-	switch strings.ToLower(field) {
+	lower := strings.ToLower(field)
+
+	// request.header.<name> / response.header.<name>: headers are already
+	// captured (Payload.Headers, keys lowercased by flattenHeaders) but had no
+	// filter field of their own. Prefix-resolved rather than a fixed switch
+	// case since the header name is open-ended; an empty name after the
+	// prefix (e.g. bare "request.header.") falls through to the unknown-field
+	// error below instead of matching on an empty key.
+	if name, ok := strings.CutPrefix(lower, "request.header."); ok && name != "" {
+		return func(e *api.Entry) string { return e.Request.Headers[name] }
+	}
+	if name, ok := strings.CutPrefix(lower, "response.header."); ok && name != "" {
+		return func(e *api.Entry) string { return e.Response.Headers[name] }
+	}
+
+	switch lower {
 	case "namespace", "ns":
 		// The real either-side match/exclude logic lives in parseComparison
 		// (which intercepts "namespace"/"ns" before ever calling this), so

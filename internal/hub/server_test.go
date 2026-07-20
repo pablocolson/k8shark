@@ -14,7 +14,7 @@ import (
 
 func TestHandleMetrics(t *testing.T) {
 	s := New(slog.Default(), Options{})
-	s.store.add(&api.Entry{ID: "x", Protocol: api.ProtocolHTTP, Timestamp: time.Now()})
+	s.store.add(&api.Entry{ID: "x", Protocol: api.ProtocolHTTP, Status: "success", Timestamp: time.Now()})
 
 	rec := httptest.NewRecorder()
 	s.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -27,6 +27,14 @@ func TestHandleMetrics(t *testing.T) {
 		"k8shark_hub_workers",
 		"k8shark_hub_broadcast_dropped_total",
 		"k8shark_hub_entries_total 1",
+		"k8shark_hub_entries_per_sec",
+		"k8shark_hub_buffer_capacity",
+		"k8shark_hub_buffer_entries 1",
+		`k8shark_hub_entries_by_protocol_total{protocol="http"} 1`,
+		`k8shark_hub_entries_by_status_total{status="success"} 1`,
+		// Not in a cluster in this test, so the resolver is disabled and never
+		// fails a refresh -- the counter must still be exposed at 0, not omitted.
+		"k8shark_hub_k8s_enrich_failures_total 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q\n%s", want, body)
@@ -67,6 +75,47 @@ func TestHandleEntriesTimeRange(t *testing.T) {
 	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?since=bogus", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("since=bogus status = %d, want 400", rec.Code)
+	}
+}
+
+// ?sort=&order= returns the top-N entries by numeric field value, and
+// rejects a bad field/order with 400 instead of silently ignoring it.
+func TestHandleEntriesSort(t *testing.T) {
+	s := New(slog.Default(), Options{})
+	s.store.add(&api.Entry{ID: "a", Protocol: api.ProtocolHTTP, ElapsedMs: 10})
+	s.store.add(&api.Entry{ID: "b", Protocol: api.ProtocolHTTP, ElapsedMs: 90})
+	s.store.add(&api.Entry{ID: "c", Protocol: api.ProtocolHTTP, ElapsedMs: 30})
+
+	rec := httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?sort=elapsedMs&limit=2", nil))
+	var got []api.Entry
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding entries: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "b" || got[1].ID != "c" {
+		t.Fatalf("sort=elapsedMs (default desc) limit=2 = %+v, want [b(90), c(30)]", got)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?sort=elapsedMs&order=asc&limit=2", nil))
+	got = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding entries: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" {
+		t.Fatalf("sort=elapsedMs order=asc limit=2 = %+v, want [a(10), c(30)]", got)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?sort=protocol", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("sort on a non-numeric field status = %d, want 400", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?sort=elapsedMs&order=sideways", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad order status = %d, want 400", rec.Code)
 	}
 }
 
@@ -148,6 +197,34 @@ func TestHandleWorkers(t *testing.T) {
 	s.workerUpdate("unknown", func(wi *workerInfo) { wi.Entries++ })
 	if len(s.workerSnapshot()) != 2 {
 		t.Error(`"unknown" node leaked into the registry`)
+	}
+}
+
+// gcWorkers prunes a disconnected worker once it's aged past workerGCTTL, but
+// never a still-connected one and never a disconnected-but-recent one.
+func TestGCWorkers(t *testing.T) {
+	s := New(slog.Default(), Options{})
+	old := time.Now().Add(-workerGCTTL - time.Minute)
+	recent := time.Now().Add(-time.Minute)
+
+	s.workerUpdate("stale", func(wi *workerInfo) { wi.Connected = false; wi.LastSeen = old })
+	s.workerUpdate("fresh", func(wi *workerInfo) { wi.Connected = false; wi.LastSeen = recent })
+	s.workerUpdate("stuck-connected", func(wi *workerInfo) { wi.Connected = true; wi.LastSeen = old })
+
+	s.gcWorkers()
+
+	present := map[string]bool{}
+	for _, wi := range s.workerSnapshot() {
+		present[wi.Node] = true
+	}
+	if present["stale"] {
+		t.Error("a disconnected worker past workerGCTTL should have been GC'd")
+	}
+	if !present["fresh"] {
+		t.Error("a recently-disconnected worker should not have been GC'd")
+	}
+	if !present["stuck-connected"] {
+		t.Error("a still-connected worker must never be GC'd regardless of LastSeen")
 	}
 }
 
