@@ -228,6 +228,10 @@ function OverviewTab({ entry }: { entry: Entry }) {
     push(rows, "exchange", rq.exchange);
     push(rows, "routing key", rq.routingKey);
     push(rows, "queue", rq.queue);
+  } else if (proto === "ws") {
+    push(rows, "opcode", rq.wsOpcode);
+    push(rows, "preview", rq.body);
+    push(rows, "size", rq.size ? `${rq.size} B` : undefined);
   } else {
     push(rows, "flags", rq.flags);
     push(rows, "packets", rq.packets);
@@ -292,6 +296,9 @@ function MessageTab({
     push(rows, "routing key", p.routingKey);
     push(rows, "queue", p.queue);
     push(rows, "delivery tag", p.deliveryTag);
+  } else if (protocol === "ws" && side === "request") {
+    push(rows, "opcode", p.wsOpcode);
+    push(rows, "size", p.size ? `${p.size} B` : undefined);
   }
 
   return (

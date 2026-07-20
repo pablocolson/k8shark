@@ -15,6 +15,7 @@ const (
 	ProtocolValkey   Protocol = "valkey" // Redis-compatible RESP; distinguished only by config
 	ProtocolPostgres Protocol = "postgres"
 	ProtocolAMQP     Protocol = "amqp" // RabbitMQ / AMQP 0-9-1
+	ProtocolWS       Protocol = "ws"   // WebSocket frames after an HTTP 101 Upgrade (RFC 6455)
 	ProtocolTCP      Protocol = "tcp"  // generic L4 flow (undissected TCP)
 	ProtocolUDP      Protocol = "udp"  // generic L4 flow (non-DNS UDP)
 	ProtocolICMP     Protocol = "icmp" // ICMP echo / errors
@@ -77,6 +78,13 @@ type Payload struct {
 	Packets int64  `json:"packets,omitempty"`
 	Bytes   int64  `json:"bytes,omitempty"`
 	Flags   string `json:"flags,omitempty"` // e.g. "SYN,FIN" for TCP
+
+	// WebSocket (DIS-6). Standalone post-Upgrade frames (Protocol "ws"): the
+	// frame's descriptive fields go here (there is no request/response pairing
+	// for an async frame). WSOpcode is the RFC 6455 opcode name
+	// ("text"|"binary"|"close"|"ping"|"pong"|"continuation"); the bounded
+	// payload preview reuses the shared Body/Summary/Size fields above.
+	WSOpcode string `json:"wsOpcode,omitempty"`
 
 	// Full-fidelity extras (additive; protocol-specific sub-objects). Old
 	// front-ends ignore these; the canonical scalars above stay the values the

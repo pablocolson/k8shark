@@ -628,6 +628,10 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Request.ReplyTo }
 	case "amqp.class":
 		return func(e *api.Entry) string { return e.Request.Class }
+
+	// --- WebSocket (DIS-6) ------------------------------------------------
+	case "ws.opcode":
+		return func(e *api.Entry) string { return e.Request.WSOpcode }
 	case "amqp.method":
 		// Method is shared with HTTP; scope this to AMQP so the facet/filter
 		// isn't polluted by HTTP verbs.

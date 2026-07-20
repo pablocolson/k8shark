@@ -54,7 +54,7 @@ var (
 // duplicated accessors here.
 var fieldCatalog = []FieldSpec{
 	{Name: "protocol", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
-		EnumValues: []string{"http", "dns", "redis", "valkey", "postgres", "tcp", "udp", "icmp", "amqp"}},
+		EnumValues: []string{"http", "dns", "redis", "valkey", "postgres", "tcp", "udp", "icmp", "amqp", "ws"}},
 	{Name: "status", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
 		EnumValues: []string{"success", "warning", "error"}},
 	{Name: "node", Type: FieldTypeString, Operators: opsString, TrackValues: true},
@@ -120,6 +120,10 @@ var fieldCatalog = []FieldSpec{
 	// typically a small set of callback queues, so it is.
 	{Name: "amqp.correlationid", Type: FieldTypeFreetext, Operators: opsText, TrackValues: false},
 	{Name: "amqp.replyto", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+
+	// WebSocket (DIS-6). Frames captured after a 101 Switching Protocols.
+	{Name: "ws.opcode", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
+		EnumValues: []string{"text", "binary", "close", "ping", "pong", "continuation"}},
 
 	// Previously display-only fields, now filterable (roadmap: "champs backend
 	// déjà calculés, invisibles côté UI").

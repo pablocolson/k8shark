@@ -378,6 +378,29 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 				resp.Body.Close()
 				continue
 			}
+			if resp.StatusCode == http.StatusSwitchingProtocols && isWebSocketUpgradeResponse(resp) {
+				// The server accepted an Upgrade: after a 101 the connection
+				// stops speaking HTTP and carries RFC 6455 frames. Emit the
+				// handshake as a normal HTTP entry (it pairs with the pending
+				// GET). A 101 has no HTTP body (net/http leaves br positioned
+				// right after the response headers, at the first frame), so we
+				// hand that same br straight to the frame parser instead of
+				// looping back into http.ReadResponse (which would misparse the
+				// frames and abandon the connection — the bug this fixes).
+				p.completeResponse(key, api.Payload{
+					StatusCode: resp.StatusCode,
+					Headers:    p.flattenHeaders(resp.Header),
+					Raw:        rawOf(cr),
+					HTTP:       &api.HTTPDetail{Version: resp.Proto},
+					Summary:    "101 Switching Protocols",
+				}, resp.StatusCode, classifyHTTP(resp.StatusCode), firstByte)
+				// Both directions are WebSocket now; this goroutine owns the
+				// server -> client direction (on the response flow Src is the
+				// server).
+				srv, cli := c.endpoints()
+				p.consumeWSFrames(br, srv, cli)
+				return
+			}
 			body, truncated, full := p.drainBody(resp.Body)
 			body, truncated = decompressBody(body, truncated, resp.Header.Get("Content-Encoding"), p.bodyCap)
 			ct := resp.Header.Get("Content-Type")
@@ -417,6 +440,223 @@ func (p *pipeline) consumeHTTPID(c connID, r io.Reader) {
 			HTTP:        &api.HTTPDetail{Version: req.Proto, ContentType: ct, Query: parseQuery(req.URL, p.redactHeaders)},
 			Summary:     req.Method + " " + redactedRequestURI(req.URL, p.redactHeaders),
 		}, src, dst)
+		if isWebSocketUpgradeRequest(req) {
+			// The client asked to switch protocols. Its half of the connection
+			// carries WebSocket frames from here on (the server's 101 is seen
+			// and paired on the response goroutine); switch this direction to
+			// frame parsing. drainBody read nothing for the bodyless upgrade
+			// GET, so br is positioned at the first client frame.
+			p.consumeWSFrames(br, src, dst)
+			return
+		}
+	}
+}
+
+// --- WebSocket (RFC 6455) ---------------------------------------------------
+
+// isWebSocketUpgradeRequest reports whether req is an HTTP/1.1 Upgrade to
+// WebSocket (Upgrade: websocket + a Connection token of "upgrade").
+func isWebSocketUpgradeRequest(req *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket") &&
+		headerHasToken(req.Header.Get("Connection"), "upgrade")
+}
+
+// isWebSocketUpgradeResponse reports whether resp (already known to be a 101)
+// completes a WebSocket upgrade (Upgrade: websocket).
+func isWebSocketUpgradeResponse(resp *http.Response) bool {
+	return strings.EqualFold(strings.TrimSpace(resp.Header.Get("Upgrade")), "websocket")
+}
+
+// headerHasToken reports whether a comma-separated header value contains token
+// (case-insensitive), e.g. Connection: "keep-alive, Upgrade".
+func headerHasToken(value, token string) bool {
+	for _, part := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
+// RFC 6455 frame opcodes.
+const (
+	wsOpcodeContinuation byte = 0x0
+	wsOpcodeText         byte = 0x1
+	wsOpcodeBinary       byte = 0x2
+	wsOpcodeClose        byte = 0x8
+	wsOpcodePing         byte = 0x9
+	wsOpcodePong         byte = 0xA
+)
+
+const (
+	// wsMaxPayload bounds a single frame's declared payload length. A frame
+	// claiming more is treated as desynced/garbled framing (an attacker or a
+	// misparse can put an arbitrary 64-bit length on the wire) and ends the
+	// direction rather than trying to consume it — 8 MiB is far above any
+	// realistic control/text frame while staying a safe ceiling.
+	wsMaxPayload = 8 << 20
+	// wsPreviewBytes bounds how many payload bytes are read into memory for the
+	// frame preview; the remainder is discarded so the stream stays
+	// frame-aligned regardless of frame size (cf. redisMaxValueDisplay).
+	wsPreviewBytes = 256
+	// wsSummaryPreview bounds the preview text embedded in an entry's summary.
+	wsSummaryPreview = 120
+)
+
+// consumeWSFrames parses RFC 6455 frames from one direction of an
+// already-upgraded WebSocket connection, emitting a standalone api.Entry per
+// frame (the async, unpaired model dissect_redis.go's emitRedisPush uses). It
+// is deliberately minimal: it decodes the FIN/opcode/mask bit and the 7/16/64-
+// bit payload length, unmasks with the 4-byte key, and renders a bounded
+// preview. It never panics on a short or garbled frame — any read error or
+// oversize length ends the direction cleanly (discarding the rest so the
+// stream advances), never a partial re-read that could desync further.
+func (p *pipeline) consumeWSFrames(br *bufio.Reader, src, dst api.Endpoint) {
+	var hdr [2]byte
+	for {
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			io.Copy(io.Discard, br)
+			return
+		}
+		opcode := hdr[0] & 0x0f
+		masked := hdr[1]&0x80 != 0
+		payloadLen := uint64(hdr[1] & 0x7f)
+		switch payloadLen {
+		case 126:
+			var ext [2]byte
+			if _, err := io.ReadFull(br, ext[:]); err != nil {
+				io.Copy(io.Discard, br)
+				return
+			}
+			payloadLen = uint64(binary.BigEndian.Uint16(ext[:]))
+		case 127:
+			var ext [8]byte
+			if _, err := io.ReadFull(br, ext[:]); err != nil {
+				io.Copy(io.Discard, br)
+				return
+			}
+			payloadLen = binary.BigEndian.Uint64(ext[:])
+		}
+		if payloadLen > wsMaxPayload {
+			io.Copy(io.Discard, br) // desynced or absurd length — stop cleanly
+			return
+		}
+		var maskKey [4]byte
+		if masked {
+			if _, err := io.ReadFull(br, maskKey[:]); err != nil {
+				io.Copy(io.Discard, br)
+				return
+			}
+		}
+		// Read only a bounded prefix for the preview; discard the remainder so
+		// the reader stays aligned on the next frame boundary.
+		previewN := payloadLen
+		if previewN > wsPreviewBytes {
+			previewN = wsPreviewBytes
+		}
+		preview := make([]byte, int(previewN))
+		if _, err := io.ReadFull(br, preview); err != nil {
+			io.Copy(io.Discard, br) // truncated frame — stop, don't misparse
+			return
+		}
+		if masked {
+			for i := range preview {
+				preview[i] ^= maskKey[i%4]
+			}
+		}
+		if remaining := payloadLen - previewN; remaining > 0 {
+			if _, err := io.CopyN(io.Discard, br, int64(remaining)); err != nil {
+				p.emitWSFrame(src, dst, opcode, preview, payloadLen)
+				io.Copy(io.Discard, br)
+				return
+			}
+		}
+		p.emitWSFrame(src, dst, opcode, preview, payloadLen)
+		if opcode == wsOpcodeClose {
+			io.Copy(io.Discard, br) // no frames follow a close
+			return
+		}
+	}
+}
+
+// emitWSFrame emits one WebSocket frame as a standalone entry.
+func (p *pipeline) emitWSFrame(src, dst api.Endpoint, opcode byte, payload []byte, fullLen uint64) {
+	name := wsOpcodeName(opcode)
+	var summary, body string
+	switch opcode {
+	case wsOpcodeClose:
+		if code, reason := wsCloseInfo(payload); code != 0 {
+			summary = "close " + strconv.Itoa(code)
+			if reason != "" {
+				summary += " " + reason
+			}
+			body = summary
+		} else {
+			summary = "close"
+		}
+	case wsOpcodePing, wsOpcodePong:
+		summary = name
+		if len(payload) > 0 {
+			body = safeBody(string(payload))
+		}
+	default: // text / binary / continuation — safeBody renders binary via binaryPreview
+		body = safeBody(string(payload))
+		if body != "" {
+			summary = name + " " + truncate(body, wsSummaryPreview)
+		} else {
+			summary = name
+		}
+	}
+	p.sink.emit(&api.Entry{
+		ID:          p.node + "-ws-" + strconv.FormatUint(p.seq.Add(1), 36),
+		Protocol:    api.ProtocolWS,
+		Timestamp:   time.Now(),
+		Node:        p.node,
+		Source:      src,
+		Destination: dst,
+		Request: api.Payload{
+			WSOpcode:  name,
+			Summary:   summary,
+			Body:      body,
+			Size:      int(fullLen),
+			Truncated: fullLen > uint64(len(payload)),
+		},
+		Status: "success",
+	})
+}
+
+// wsCloseInfo decodes a close frame's payload: a 2-byte big-endian status code
+// (RFC 6455 §7.4) optionally followed by a UTF-8 reason. Returns (0, "") when
+// no code is present (an empty close payload is valid).
+func wsCloseInfo(payload []byte) (code int, reason string) {
+	if len(payload) < 2 {
+		return 0, ""
+	}
+	code = int(binary.BigEndian.Uint16(payload[:2]))
+	if len(payload) > 2 {
+		reason = safeBody(string(payload[2:]))
+	}
+	return code, reason
+}
+
+// wsOpcodeName renders an RFC 6455 opcode as a short name (fed to the ws.opcode
+// filter field and the UI).
+func wsOpcodeName(op byte) string {
+	switch op {
+	case wsOpcodeContinuation:
+		return "continuation"
+	case wsOpcodeText:
+		return "text"
+	case wsOpcodeBinary:
+		return "binary"
+	case wsOpcodeClose:
+		return "close"
+	case wsOpcodePing:
+		return "ping"
+	case wsOpcodePong:
+		return "pong"
+	default:
+		return "opcode-" + strconv.Itoa(int(op))
 	}
 }
 

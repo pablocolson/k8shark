@@ -7,6 +7,7 @@ export type Protocol =
   | "valkey"
   | "postgres"
   | "amqp"
+  | "ws"
   | "tcp"
   | "udp"
   | "icmp";
@@ -141,6 +142,8 @@ export interface Payload {
   queue?: string;
   deliveryTag?: number;
   class?: string;
+  // WebSocket (post-101 frames)
+  wsOpcode?: string;
   // L4 flows
   packets?: number;
   bytes?: number;

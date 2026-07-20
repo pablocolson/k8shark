@@ -1240,3 +1240,161 @@ func TestAMQPOversizedBodyFrame(t *testing.T) {
 		t.Errorf("entry1 queue = %q, want after (framing after oversized frame)", got[1].Request.Queue)
 	}
 }
+
+// --- WebSocket (DIS-6) ------------------------------------------------------
+
+const (
+	wsUpgradeReq = "GET /ws HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+	wsUpgradeResp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+)
+
+// wsFrame builds a single RFC 6455 frame (FIN set). When maskKey is non-nil the
+// payload is masked with it (client -> server frames MUST be masked; server ->
+// client MUST NOT). It uses the 7-bit length form, which is all these tests
+// need (payloads < 126 bytes).
+func wsFrame(opcode byte, payload, maskKey []byte) []byte {
+	if len(payload) >= 126 {
+		panic("wsFrame helper only supports <126-byte payloads")
+	}
+	out := []byte{0x80 | opcode} // FIN + opcode
+	b1 := byte(len(payload))
+	body := append([]byte(nil), payload...)
+	if maskKey != nil {
+		b1 |= 0x80
+		for i := range body {
+			body[i] ^= maskKey[i%4]
+		}
+	}
+	out = append(out, b1)
+	if maskKey != nil {
+		out = append(out, maskKey...)
+	}
+	return append(out, body...)
+}
+
+// wsEntriesBySide splits ws entries into the client->server and server->client
+// directions by source port (client on clientPort, server on serverPort).
+func wsEntriesBySide(entries []*api.Entry, clientPort int) (client, server []*api.Entry) {
+	for _, e := range entries {
+		if e.Protocol != api.ProtocolWS {
+			continue
+		}
+		if e.Source.Port == clientPort {
+			client = append(client, e)
+		} else {
+			server = append(server, e)
+		}
+	}
+	return
+}
+
+// A real GET+Upgrade -> 101 handshake followed by a masked client text frame
+// and an unmasked server text frame must yield the HTTP handshake entry plus
+// two standalone ws entries (one per direction) with correctly unmasked
+// previews — instead of the response loop misparsing frames as HTTP and
+// abandoning the whole connection (the DIS-6 bug).
+func TestWebSocketUpgradeAndTextFrames(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	const clientPort = 40500
+	rNet, rTr, sNet, sTr := flows(clientPort, 80)
+
+	clientFrame := wsFrame(wsOpcodeText, []byte("ping from client"), []byte{0x37, 0xfa, 0x21, 0x3d})
+	serverFrame := wsFrame(wsOpcodeText, []byte("pong from server"), nil)
+
+	p.consumeHTTP(rNet, rTr, strings.NewReader(wsUpgradeReq+string(clientFrame)))
+	p.consumeHTTP(sNet, sTr, strings.NewReader(wsUpgradeResp+string(serverFrame)))
+
+	got := drain(s)
+
+	var httpN int
+	for _, e := range got {
+		if e.Protocol == api.ProtocolHTTP {
+			httpN++
+			if e.StatusCode != 101 {
+				t.Errorf("http handshake statusCode = %d, want 101", e.StatusCode)
+			}
+		}
+	}
+	if httpN != 1 {
+		t.Fatalf("got %d http entries, want 1 (the 101 handshake)", httpN)
+	}
+
+	client, server := wsEntriesBySide(got, clientPort)
+	if len(client) != 1 || len(server) != 1 {
+		t.Fatalf("got %d client + %d server ws frames, want 1 + 1 (entries: %+v)", len(client), len(server), got)
+	}
+	if client[0].Request.WSOpcode != "text" || !strings.Contains(client[0].Request.Body, "ping from client") {
+		t.Errorf("client frame = opcode %q body %q, want text 'ping from client' (unmasked)",
+			client[0].Request.WSOpcode, client[0].Request.Body)
+	}
+	if server[0].Request.WSOpcode != "text" || !strings.Contains(server[0].Request.Body, "pong from server") {
+		t.Errorf("server frame = opcode %q body %q, want text 'pong from server'",
+			server[0].Request.WSOpcode, server[0].Request.Body)
+	}
+}
+
+// A close frame must be surfaced as a ws entry noting its RFC 6455 close code.
+func TestWebSocketCloseFrame(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	const clientPort = 40600
+	rNet, rTr, sNet, sTr := flows(clientPort, 80)
+
+	closePayload := append([]byte{0x03, 0xe8}, []byte("bye")...) // code 1000 + reason
+	serverClose := wsFrame(wsOpcodeClose, closePayload, nil)
+
+	p.consumeHTTP(rNet, rTr, strings.NewReader(wsUpgradeReq)) // client sends no frames
+	p.consumeHTTP(sNet, sTr, strings.NewReader(wsUpgradeResp+string(serverClose)))
+
+	got := drain(s)
+	_, server := wsEntriesBySide(got, clientPort)
+	if len(server) != 1 {
+		t.Fatalf("got %d server ws frames, want 1 (the close) (entries: %+v)", len(server), got)
+	}
+	if server[0].Request.WSOpcode != "close" {
+		t.Errorf("opcode = %q, want close", server[0].Request.WSOpcode)
+	}
+	if !strings.Contains(server[0].Request.Summary, "1000") {
+		t.Errorf("summary = %q, want it to note close code 1000", server[0].Request.Summary)
+	}
+	if !strings.Contains(server[0].Request.Summary, "bye") {
+		t.Errorf("summary = %q, want it to include the close reason", server[0].Request.Summary)
+	}
+}
+
+// Truncated and garbled frames must never panic and must never desync into a
+// runaway allocation: the parser stops the direction cleanly, and the HTTP
+// handshake entry is still emitted in every case.
+func TestWebSocketGarbledFrameNoPanic(t *testing.T) {
+	cases := map[string][]byte{
+		"lone header byte":        {0x88},
+		"truncated 16-bit length": {0x81, 0x7e, 0x00},                                           // len=126, only 1 of 2 ext bytes
+		"truncated 64-bit length": {0x82, 0x7f, 0xff, 0xff},                                     // len=127, partial ext
+		"absurd 64-bit length":    {0x82, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, // > wsMaxPayload
+		"masked but no key":       {0x81, 0x85, 0x01},                                           // masked text len=5, key cut off
+		"len exceeds payload":     {0x81, 0x0a, 'h', 'i'},                                       // claims 10, only 2 present
+	}
+	for name, garbled := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newSink("", "", "n", discardLogger())
+			p := newPipeline(s, "n", discardLogger())
+			rNet, rTr, sNet, sTr := flows(40700, 80)
+
+			p.consumeHTTP(rNet, rTr, strings.NewReader(wsUpgradeReq))
+			p.consumeHTTP(sNet, sTr, strings.NewReader(wsUpgradeResp+string(garbled))) // must not panic
+
+			var httpN int
+			for _, e := range drain(s) {
+				if e.Protocol == api.ProtocolHTTP {
+					httpN++
+				}
+			}
+			if httpN != 1 {
+				t.Errorf("got %d http handshake entries, want 1 (a garbled frame must not lose the handshake)", httpN)
+			}
+		})
+	}
+}

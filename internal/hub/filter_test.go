@@ -233,6 +233,42 @@ func TestCompileFilterAMQP(t *testing.T) {
 	}
 }
 
+// ws.opcode resolves against a post-101 WebSocket frame entry (DIS-6).
+func TestCompileFilterWebSocket(t *testing.T) {
+	e := &api.Entry{
+		Protocol: api.ProtocolWS,
+		Status:   "success",
+		Request:  api.Payload{WSOpcode: "text", Summary: "text hello", Body: "hello"},
+	}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`protocol == "ws"`, true},
+		{`ws.opcode == "text"`, true},
+		{`ws.opcode == "binary"`, false},
+		{`ws.opcode in ("text", "close")`, true},
+		{`protocol == "ws" and ws.opcode == "text"`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	// ws.opcode is empty (never matches) on a non-ws entry.
+	http := &api.Entry{Protocol: api.ProtocolHTTP, Request: api.Payload{Method: "GET"}}
+	pred, _ := CompileFilter(`ws.opcode == "text"`)
+	if pred(http) {
+		t.Error("ws.opcode matched a non-WebSocket entry")
+	}
+}
+
 // request.header.<name>/response.header.<name> resolve against the already-
 // captured (and lowercased, per flattenHeaders) Payload.Headers map, matching
 // case-insensitively on the field name itself same as any other field; a bare
