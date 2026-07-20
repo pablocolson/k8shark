@@ -19,9 +19,10 @@ import (
 // Bounds so a garbled or TLS-encrypted stream misparsed as RESP can't drive a
 // huge allocation or a stack overflow.
 const (
-	maxRESPBulk     = 64 << 20 // 64 MiB per bulk string
-	maxRESPElements = 1 << 20  // aggregate elements per array/map
-	maxRESPDepth    = 64       // nesting depth (guards unbounded recursion)
+	maxRESPBulk     = 512 << 20 // wire-sanity cap per bulk string (redis' own proto-max-bulk-len default)
+	maxRESPCapture  = 1 << 20   // bulk bytes materialized in memory; the rest is discarded, not allocated
+	maxRESPElements = 1 << 20   // aggregate elements per array/map
+	maxRESPDepth    = 64        // nesting depth (guards unbounded recursion)
 )
 
 var errRESP = errors.New("redis: RESP value exceeds bounds")
@@ -187,11 +188,21 @@ func parseRESPDepth(br *bufio.Reader, depth int) (respVal, error) {
 		if n > maxRESPBulk {
 			return respVal{}, errRESP
 		}
-		buf := make([]byte, n+2) // payload + trailing CRLF
+		// Materialize at most maxRESPCapture bytes (display/filtering only
+		// ever uses a bounded prefix) and discard the rest plus the trailing
+		// CRLF, so a multi-MiB SET value can't drive a matching allocation.
+		take := n
+		if take > maxRESPCapture {
+			take = maxRESPCapture
+		}
+		buf := make([]byte, take)
 		if _, err := io.ReadFull(br, buf); err != nil {
 			return respVal{}, err
 		}
-		return respVal{typ: t, str: string(buf[:n])}, nil
+		if _, err := io.CopyN(io.Discard, br, int64(n-take)+2); err != nil {
+			return respVal{}, err
+		}
+		return respVal{typ: t, str: string(buf)}, nil
 	case '*', '~', '>': // array / RESP3 set / RESP3 push (n elements)
 		return parseRESPAgg(br, t, depth, 1)
 	case '%': // RESP3 map (n key/value pairs => 2n elements)

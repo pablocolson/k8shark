@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,20 +30,28 @@ type Options struct {
 	// UIDir, when non-empty, is a directory whose static files are served at
 	// "/" (used for local runs; in-cluster the front is a separate nginx pod).
 	UIDir string
-	// APIToken, when non-empty, requires `Authorization: Bearer <token>` (or a
-	// ?token= query param, for browser WebSockets) on /api/* and the WebSocket
+	// APIToken, when non-empty, requires `Authorization: Bearer <token>` (or,
+	// for browser WebSockets that cannot set headers, a
+	// `Sec-WebSocket-Protocol: bearer.<token>` subprotocol or a ?token= query
+	// param — prefer the subprotocol: a token in the URL leaks into access
+	// logs, browser history and Referer headers) on /api/* and the WebSocket
 	// endpoints. Empty keeps the API open (local dev, trusted clusters).
 	APIToken string
 	// BufferSize overrides the in-memory entry ring size (0 = default).
 	BufferSize int
+	// AllowedOrigins lists extra browser Origins granted API/WebSocket access
+	// and CORS headers, on top of the same-origin default (Origin host ==
+	// request Host). "*" restores the old allow-any behavior.
+	AllowedOrigins []string
 }
 
 // Server is the hub. Construct with New and start with Run.
 type Server struct {
-	store    *store
-	log      *slog.Logger
-	upgrader websocket.Upgrader
-	apiToken string
+	store        *store
+	log          *slog.Logger
+	upgrader     websocket.Upgrader
+	apiToken     string
+	allowOrigins []string
 
 	mu           sync.RWMutex
 	frontClients map[*frontClient]struct{}
@@ -86,10 +95,11 @@ func New(log *slog.Logger, opts Options) *Server {
 	if size <= 0 {
 		size = config.EntryBufferSize
 	}
-	return &Server{
+	s := &Server{
 		store:        newStore(size),
 		log:          log,
 		apiToken:     opts.APIToken,
+		allowOrigins: opts.AllowedOrigins,
 		frontClients: map[*frontClient]struct{}{},
 		workers:      map[string]*workerInfo{},
 		workerConns:  map[string]chan []byte{},
@@ -98,11 +108,16 @@ func New(log *slog.Logger, opts Options) *Server {
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
-			// Dashboards are typically reached cross-origin (port-forward,
-			// ingress); allow any origin. Tighten via ingress auth in prod.
-			CheckOrigin: func(*http.Request) bool { return true },
 		},
 	}
+	// Same-origin by default (plus the --allow-origin list): during a
+	// port-forward without a token — the default — an allow-any policy would
+	// let any web page open in the operator's browser open the WS and exfiltrate
+	// the cluster's captured traffic. Non-browser clients send no Origin and
+	// are unaffected; in-cluster the nginx front and the vite dev proxy both
+	// preserve a matching Host, so same-origin holds there too.
+	s.upgrader.CheckOrigin = s.originAllowed
+	return s
 }
 
 // handler builds the fully-wrapped HTTP handler (route mux + auth + CORS) the
@@ -130,7 +145,7 @@ func (s *Server) handler() http.Handler {
 	if s.uiDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.uiDir)))
 	}
-	return withCORS(s.withAuth(mux))
+	return s.withCORS(s.withAuth(mux))
 }
 
 // Run serves until ctx is cancelled (e.g. SIGINT/SIGTERM), then drains
@@ -188,7 +203,7 @@ type workerInfo struct {
 }
 
 func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, wsUpgradeHeader(r))
 	if err != nil {
 		s.log.Warn("worker upgrade failed", "err", err)
 		return
@@ -391,7 +406,7 @@ type frontClient struct {
 }
 
 func (s *Server) handleFront(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, wsUpgradeHeader(r))
 	if err != nil {
 		s.log.Warn("front upgrade failed", "err", err)
 		return
@@ -1054,7 +1069,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 // withAuth enforces the optional API token on /api/* and the WebSocket
 // endpoints. Static UI assets, /healthz and /metrics stay open (the data is
 // behind /api; metrics scraping is cluster-internal). Browsers cannot set
-// headers on a WebSocket, so a ?token= query param is accepted as well.
+// headers on a WebSocket, so a `Sec-WebSocket-Protocol: bearer.<token>`
+// subprotocol is accepted, as is a ?token= query param (deprecated: a token in
+// the URL leaks into access logs, history and Referer headers).
 func (s *Server) withAuth(h http.Handler) http.Handler {
 	if s.apiToken == "" {
 		return h
@@ -1067,6 +1084,9 @@ func (s *Server) withAuth(h http.Handler) http.Handler {
 			return
 		}
 		got := r.URL.Query().Get("token")
+		if tok := strings.TrimPrefix(wsBearerProtocol(r), wsBearerPrefix); tok != "" {
+			got = tok
+		}
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			got = strings.TrimPrefix(auth, "Bearer ")
 		}
@@ -1078,11 +1098,69 @@ func (s *Server) withAuth(h http.Handler) http.Handler {
 	})
 }
 
-func withCORS(h http.Handler) http.Handler {
+// wsBearerPrefix marks the WebSocket subprotocol entry that carries the API
+// token for browser clients (which cannot set an Authorization header on a
+// WebSocket): `Sec-WebSocket-Protocol: bearer.<token>`.
+const wsBearerPrefix = "bearer."
+
+// wsBearerProtocol returns the full `bearer.<token>` entry from the request's
+// Sec-WebSocket-Protocol list, or "" if none. The full entry (not just the
+// token) is returned so upgrade handlers can echo it back as the selected
+// subprotocol — browsers fail the connection when a requested subprotocol
+// isn't acknowledged by the server.
+func wsBearerProtocol(r *http.Request) string {
+	for _, part := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if part = strings.TrimSpace(part); strings.HasPrefix(part, wsBearerPrefix) {
+			return part
+		}
+	}
+	return ""
+}
+
+// wsUpgradeHeader builds the response header for a WebSocket upgrade: when the
+// client authenticated via the bearer subprotocol, it must be echoed as the
+// selected one or browsers abort the freshly-opened connection.
+func wsUpgradeHeader(r *http.Request) http.Header {
+	if proto := wsBearerProtocol(r); proto != "" {
+		return http.Header{"Sec-WebSocket-Protocol": {proto}}
+	}
+	return nil
+}
+
+// originAllowed reports whether a browser Origin may reach the API: same-origin
+// (Origin host equals the request Host, the case for the nginx front, the vite
+// dev proxy and a direct port-forward) or listed in --allow-origin ("*" allows
+// any). Requests without an Origin header — curl, workers, the MCP — always
+// pass; this guards browsers, whose cross-site requests can't drop the header.
+func (s *Server) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if u, err := url.Parse(origin); err == nil && strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, allowed := range s.allowOrigins {
+		if allowed == "*" || strings.EqualFold(strings.TrimRight(allowed, "/"), strings.TrimRight(origin, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// withCORS emits CORS headers only for allowed origins (echoing the origin,
+// never a wildcard), so a random web page can't read API responses from an
+// operator's port-forwarded hub. Same-origin requests don't need CORS headers
+// but get them anyway (harmless); disallowed origins get none, which makes the
+// browser block the response.
+func (s *Server) withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

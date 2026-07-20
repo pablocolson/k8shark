@@ -16,6 +16,7 @@ func hubCmd() *cobra.Command {
 	var uiDir string
 	var apiToken string
 	var bufferSize int
+	var allowOrigins []string
 	cmd := &cobra.Command{
 		Use:   "hub",
 		Short: "Run the hub server (aggregates worker traffic, serves the API)",
@@ -25,7 +26,7 @@ func hubCmd() *cobra.Command {
 			if apiToken == "" {
 				apiToken = os.Getenv("K8SHARK_API_TOKEN")
 			}
-			s := hub.New(log, hub.Options{UIDir: uiDir, APIToken: apiToken, BufferSize: bufferSize})
+			s := hub.New(log, hub.Options{UIDir: uiDir, APIToken: apiToken, BufferSize: bufferSize, AllowedOrigins: allowOrigins})
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			return s.Run(ctx, fmt.Sprintf(":%d", port))
@@ -35,5 +36,6 @@ func hubCmd() *cobra.Command {
 	cmd.Flags().StringVar(&uiDir, "serve-ui", "", "serve a built front from this directory (local dev)")
 	cmd.Flags().StringVar(&apiToken, "api-token", "", "require this bearer token on /api and WebSocket endpoints (default $K8SHARK_API_TOKEN; empty disables auth)")
 	cmd.Flags().IntVar(&bufferSize, "buffer", 0, "in-memory entry buffer size (0 = default 10000)")
+	cmd.Flags().StringArrayVar(&allowOrigins, "allow-origin", nil, "extra browser Origin allowed on the API and WebSockets, repeatable (default: same-origin only; \"*\" allows any)")
 	return cmd
 }

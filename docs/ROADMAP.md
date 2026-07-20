@@ -246,11 +246,53 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   `gofmt`/`go vet`/`go build`/`go test -race ./...` (222 tests) propres,
   campagnes de fuzzing sans crash, `make bench`/`make fuzz` fonctionnels.
 
+**Backlog, lot 4 — durcissement sécurité (SEC-6/8/9), 3 items traités :**
+
+- **SEC-6** : Origin vérifiée par défaut sur l'API et les WebSockets
+  (`Server.originAllowed`) — même origine (host de l'Origin == Host de la
+  requête, ce que préservent le nginx du front, le proxy dev vite et un
+  port-forward direct) plus une liste `--allow-origin` (répétable, `*`
+  restaure l'ancien comportement) ; `CheckOrigin` de l'upgrader branché
+  dessus (403 sur upgrade cross-origin), et `withCORS` n'émet plus
+  `Access-Control-Allow-Origin: *` mais écho l'origine autorisée uniquement
+  (+ `Vary: Origin`), rien pour une origine refusée. Les clients sans
+  en-tête Origin (workers, curl, MCP) passent toujours.
+- **SEC-8** : bornes d'allocation des dissecteurs abaissées — Postgres :
+  `pgMaxPayload` 64 Mio → 4 Mio de matérialisation, nouveau `pgMaxFrame`
+  (1 Gio, la limite du protocole) en garde-fou de framing, et
+  `readPGMessage(br, want)` ne matérialise que les types réellement
+  inspectés (`QPB` côté requête, `TZCE` côté réponse) : DataRow/CopyData
+  sont éliminés par `io.CopyN(io.Discard)` sans allocation. Redis : bulk
+  strings matérialisées à 1 Mio max (`maxRESPCapture`), le reste jeté en
+  préservant le framing, `maxRESPBulk` devient une garde wire-level à
+  512 Mio (le proto-max-bulk-len par défaut de Redis). AMQP : frames
+  matérialisées à 1 Mio max (`amqpMaxCapture`), `readAMQPFrame` retourne la
+  taille réelle pour que la comptabilité de body reste exacte sur une frame
+  tronquée.
+- **SEC-9** : les WebSockets navigateur peuvent porter le token en
+  sous-protocole `Sec-WebSocket-Protocol: bearer.<token>` (accepté par
+  `withAuth`, échoé comme sous-protocole négocié à l'upgrade — sinon les
+  navigateurs ferment la connexion) ; `?token=` reste accepté mais est
+  documenté déprécié (fuite dans les logs d'accès, l'historique et le
+  Referer). Conformément à la note de vérification, aucun changement
+  useHub.ts (l'UI ne passe jamais `?token=`, nginx pose l'Authorization).
+
+  Vérifié en conditions réelles (hub + worker démo réels, sondes curl) au
+  2026-07-20 : upgrade WS cross-origin → 403, même-origine + sous-protocole
+  bearer → 101 avec écho `Sec-WebSocket-Protocol`, mauvais token
+  sous-protocole → 401, `?token=` hérité → 101 + flux d'entries, worker
+  sans Origin connecté et entries au fil de l'eau, ACAO échoé pour l'origine
+  autorisée et absent pour `evil.example`. Tests : `TestCORS*`, `TestWS*`
+  (origin_test.go), `TestPostgresHuge*`, `TestRedisOversizedBulk*`,
+  `TestAMQPOversizedBodyFrame` ; `gofmt`/`go vet`/`go build`/`go test -race
+  ./...` (231 tests) propres.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/6/7/8/9, TST-5/8,
+UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/7, TST-5/8,
 EXT-2/3/4/5.
-Prochain chantier logique : d'autres items S/M de ce backlog (le lot sécurité
-SEC-6/8/9 reste le plus tranchant), ou le démarrage de la **Phase 3** (gros
+Prochain chantier logique : d'autres items S/M de ce backlog (SEC-5 tranche le
+token unique lecture/contrôle/worker, SEC-7 apporte le TLS hub), ou le
+démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 

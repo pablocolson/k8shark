@@ -15,9 +15,18 @@ import (
 	"github.com/pablocolson/k8shark/pkg/api"
 )
 
-// pgMaxPayload guards against absurd frame lengths on a misframed/encrypted
-// stream (e.g. TLS), so we bail instead of allocating gigabytes.
-const pgMaxPayload = 64 << 20
+// pgMaxPayload bounds how much of one message payload is materialized in
+// memory; anything beyond it — and every message type the dissector only
+// counts or skips, like DataRow or CopyData — is discarded via io.CopyN
+// rather than allocated, so a large resultset or COPY can't drive multi-MiB
+// allocations against the worker's memory limit.
+const pgMaxPayload = 4 << 20
+
+// pgMaxFrame is a wire-sanity bound on the declared message length itself
+// (the PostgreSQL protocol caps messages at 1 GiB): a bigger length means a
+// misframed/encrypted stream (e.g. TLS), so we bail instead of discarding
+// garbage forever.
+const pgMaxFrame = 1 << 30
 
 // pgMaxStmtQueries bounds the per-connection prepared-statement cache so a
 // connection that churns through many uniquely-named statements can't grow it
@@ -66,7 +75,10 @@ func (p *pipeline) pgRequests(br *bufio.Reader, cr *capReader, key string, src, 
 	var lastParams []string
 	stmtQueries := map[string]string{} // prepared statement name -> query text
 	for {
-		typ, payload, err := readPGMessage(br)
+		// Only Query/Parse/Bind payloads are inspected; Execute and Terminate
+		// dispatch on the type byte alone, and CopyData etc. are skipped — so
+		// their payloads are discarded, never allocated.
+		typ, payload, err := readPGMessage(br, "QPB")
 		if err != nil {
 			return
 		}
@@ -120,7 +132,9 @@ func (p *pipeline) pgResponses(br *bufio.Reader, cr *capReader, key string) {
 	var cols []api.PGColumn
 	txStatus := ""
 	for {
-		typ, payload, err := readPGMessage(br)
+		// DataRow ('D') is only counted, so its payload — the bulk of a big
+		// resultset — is discarded without allocating.
+		typ, payload, err := readPGMessage(br, "TZCE")
 		if err != nil {
 			return
 		}
@@ -165,8 +179,11 @@ func (p *pipeline) pgResponses(br *bufio.Reader, cr *capReader, key string) {
 }
 
 // readPGMessage reads one typed message: 1 type byte + int32 length (incl. the
-// length field) + payload.
-func readPGMessage(br *bufio.Reader) (byte, []byte, error) {
+// length field) + payload. Only messages whose type byte appears in want get
+// their payload materialized (bounded at pgMaxPayload, remainder discarded);
+// any other type returns a nil payload after discarding it, so a huge DataRow
+// or CopyData never allocates.
+func readPGMessage(br *bufio.Reader, want string) (byte, []byte, error) {
 	typ, err := br.ReadByte()
 	if err != nil {
 		return 0, nil, err
@@ -176,11 +193,25 @@ func readPGMessage(br *bufio.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
-	if length < 4 || length-4 > pgMaxPayload {
+	if length < 4 || length-4 > pgMaxFrame {
 		return 0, nil, errPGFrame
 	}
-	payload := make([]byte, length-4)
+	n := int64(length - 4)
+	if !strings.ContainsRune(want, rune(typ)) {
+		if _, err := io.CopyN(io.Discard, br, n); err != nil {
+			return 0, nil, err
+		}
+		return typ, nil, nil
+	}
+	take := n
+	if take > pgMaxPayload {
+		take = pgMaxPayload
+	}
+	payload := make([]byte, take)
 	if _, err := io.ReadFull(br, payload); err != nil {
+		return 0, nil, err
+	}
+	if _, err := io.CopyN(io.Discard, br, n-take); err != nil {
 		return 0, nil, err
 	}
 	return typ, payload, nil
@@ -203,7 +234,7 @@ func skipUntyped(br *bufio.Reader) error {
 		return err
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
-	if length < 4 || length-4 > pgMaxPayload {
+	if length < 4 || length-4 > pgMaxFrame {
 		return errPGFrame
 	}
 	_, err := io.CopyN(io.Discard, br, int64(length-4))

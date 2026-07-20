@@ -36,8 +36,10 @@ hub:
   # raise it (with the memory limit) when debugging busy clusters.
   bufferSize: 0
   # apiToken: when set, /api and the WebSocket endpoints require
-  # `Authorization: Bearer <token>` (or ?token=). Workers and the front proxy
-  # receive it automatically via a Secret; port-forward users pass it by hand.
+  # `Authorization: Bearer <token>` (browser WebSockets can use a
+  # `Sec-WebSocket-Protocol: bearer.<token>` subprotocol instead; ?token= also
+  # works but is deprecated — it leaks into logs/history). Workers and the front
+  # proxy receive it automatically via a Secret; port-forward users pass it by hand.
   # Empty (default) keeps the API open — anyone who can reach the hub Service
   # can read all captured traffic. `k8shark tap` auto-generates a token unless
   # given --no-auth or an explicit `--set hub.apiToken=...`; installing

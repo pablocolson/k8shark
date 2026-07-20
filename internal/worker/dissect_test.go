@@ -902,3 +902,126 @@ func TestHTTPInterimResponseNotPaired(t *testing.T) {
 		t.Errorf("StatusCode = %d, want 200 (the real response, not the 100 Continue)", got[0].Response.StatusCode)
 	}
 }
+
+// --- SEC-8: allocation bounds — oversized payloads are discarded, not buffered
+
+// A DataRow bigger than pgMaxPayload (a large resultset column, e.g. bytea)
+// must be skipped without killing the stream: framing must stay intact so the
+// following CommandComplete still pairs with the query.
+func TestPostgresHugeDataRowSkipped(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40401, pgPort)
+
+	req := pgMsg('Q', []byte("SELECT blob FROM t\x00"))
+
+	var resp []byte
+	resp = append(resp, pgMsg('D', make([]byte, pgMaxPayload+512))...) // > materialization cap
+	resp = append(resp, pgMsg('C', []byte("SELECT 1\x00"))...)
+
+	p.consumePostgres(rNet, rTr, strings.NewReader(string(req)), true)
+	p.consumePostgres(sNet, sTr, strings.NewReader(string(resp)), false)
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1 (huge DataRow must not desync the stream)", len(got))
+	}
+	if got[0].Response.Summary != "SELECT 1 (1 rows)" || got[0].Response.RowCount != 1 {
+		t.Errorf("response = %+v", got[0].Response)
+	}
+}
+
+// A huge client-side CopyData ('d') message — a COPY upload — must be
+// discarded without allocating or desyncing: the query after it still parses.
+func TestPostgresHugeCopyDataSkipped(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40402, pgPort)
+
+	var req []byte
+	req = append(req, pgMsg('d', make([]byte, pgMaxPayload+512))...)
+	req = append(req, pgMsg('Q', []byte("SELECT 1\x00"))...)
+	resp := pgMsg('C', []byte("SELECT 1\x00"))
+
+	p.consumePostgres(rNet, rTr, strings.NewReader(string(req)), true)
+	p.consumePostgres(sNet, sTr, strings.NewReader(string(resp)), false)
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1 (huge CopyData must not desync the stream)", len(got))
+	}
+	if got[0].Request.Query != "SELECT 1" {
+		t.Errorf("query = %q, want SELECT 1", got[0].Request.Query)
+	}
+}
+
+// A bulk string above maxRESPCapture is truncated in memory but fully consumed
+// on the wire: the next command on the connection must still parse.
+func TestRedisOversizedBulkTruncatedNotDesynced(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40403, redisPort)
+
+	big := strings.Repeat("a", maxRESPCapture+3)
+	req := "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$" + strconv.Itoa(len(big)) + "\r\n" + big + "\r\n" +
+		"*1\r\n$4\r\nPING\r\n"
+	resp := "+OK\r\n+PONG\r\n"
+
+	p.consumeRedis(rNet, rTr, strings.NewReader(req), true, api.ProtocolRedis)
+	p.consumeRedis(sNet, sTr, strings.NewReader(resp), false, api.ProtocolRedis)
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 (oversized bulk must not desync the stream)", len(got))
+	}
+	if !strings.HasPrefix(got[0].Request.Command, "SET key") {
+		t.Errorf("entry0 command = %q", truncate(got[0].Request.Command, 80))
+	}
+	if got[1].Request.Command != "PING" || got[1].Response.Summary != "PONG" {
+		t.Errorf("entry1 = %q / %q", got[1].Request.Command, got[1].Response.Summary)
+	}
+}
+
+// A body frame above amqpMaxCapture keeps exact size accounting (the entry is
+// emitted, with the true body size) and the next frame still parses.
+func TestAMQPOversizedBodyFrame(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, _, _ := flows(40404, amqpPort)
+
+	bodySize := amqpMaxCapture + 5
+
+	var args []byte
+	args = appendU16(args, 0)
+	args = append(args, amqpShortStrBytes("orders")...)
+	args = append(args, amqpShortStrBytes("new")...)
+	args = append(args, 0x00)
+	publish := amqpFrame(amqpFrameMethod, 1, amqpMethod(amqpClassBasic, 40, args))
+
+	var hdr []byte
+	hdr = appendU16(hdr, amqpClassBasic)
+	hdr = appendU16(hdr, 0)
+	hdr = append(hdr, 0, 0, 0, 0, byte(bodySize>>24), byte(bodySize>>16), byte(bodySize>>8), byte(bodySize))
+	hdr = appendU16(hdr, 0)
+	header := amqpFrame(amqpFrameHeader, 1, hdr)
+	body := amqpFrame(amqpFrameBody, 1, make([]byte, bodySize))
+
+	var declArgs []byte
+	declArgs = appendU16(declArgs, 0)
+	declArgs = append(declArgs, amqpShortStrBytes("after")...)
+	declare := amqpFrame(amqpFrameMethod, 1, amqpMethod(amqpClassQueue, 10, declArgs))
+
+	stream := amqpHeader + string(publish) + string(header) + string(body) + string(declare)
+	p.consumeStream(rNet, rTr, strings.NewReader(stream))
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 (truncated body frame must still complete + not desync)", len(got))
+	}
+	if got[0].Request.Size != bodySize {
+		t.Errorf("body size = %d, want %d (true on-wire size despite truncated capture)", got[0].Request.Size, bodySize)
+	}
+	if got[1].Request.Queue != "after" {
+		t.Errorf("entry1 queue = %q, want after (framing after oversized frame)", got[1].Request.Queue)
+	}
+}

@@ -20,7 +20,8 @@ const (
 	amqpFrameHeader    = 2
 	amqpFrameBody      = 3
 	amqpFrameHeartbeat = 8
-	amqpMaxFrame       = 16 << 20 // guard vs misparse/TLS; real frame-max default is 131072
+	amqpMaxFrame       = 16 << 20 // wire-sanity guard vs misparse/TLS; real frame-max default is 131072
+	amqpMaxCapture     = 1 << 20  // frame bytes materialized in memory; the rest is discarded, not allocated
 )
 
 // AMQP class IDs.
@@ -67,7 +68,7 @@ func (p *pipeline) consumeAMQPID(c connID, r io.Reader, isClient bool) {
 
 	channels := map[uint16]*amqpPending{} // per-channel content assembly
 	for {
-		ftype, ch, payload, err := readAMQPFrame(br)
+		ftype, ch, payload, full, err := readAMQPFrame(br)
 		if err != nil {
 			io.Copy(io.Discard, br)
 			return
@@ -99,7 +100,7 @@ func (p *pipeline) consumeAMQPID(c connID, r io.Reader, isClient bool) {
 			}
 		case amqpFrameBody:
 			if pend := channels[ch]; pend != nil {
-				pend.total += len(payload)
+				pend.total += full
 				if room := p.bodyCap - len(pend.body); room > 0 {
 					take := len(payload)
 					if take > room {
@@ -137,30 +138,40 @@ type amqpPending struct {
 }
 
 // readAMQPFrame reads one frame: type(1) channel(2) size(4) payload(size)
-// frame-end(1)==0xCE. It mirrors readPGMessage's bounded-read discipline.
-func readAMQPFrame(br *bufio.Reader) (ftype byte, channel uint16, payload []byte, err error) {
+// frame-end(1)==0xCE. It mirrors readPGMessage's bounded-read discipline: at
+// most amqpMaxCapture payload bytes are materialized, the remainder is
+// discarded — full reports the true on-wire payload size so body accounting
+// stays exact for truncated frames.
+func readAMQPFrame(br *bufio.Reader) (ftype byte, channel uint16, payload []byte, full int, err error) {
 	var hdr [7]byte
 	if _, err = io.ReadFull(br, hdr[:]); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, 0, err
 	}
 	ftype = hdr[0]
 	channel = binary.BigEndian.Uint16(hdr[1:3])
 	size := binary.BigEndian.Uint32(hdr[3:7])
 	if size > amqpMaxFrame {
-		return 0, 0, nil, errAMQPFrame
+		return 0, 0, nil, 0, errAMQPFrame
 	}
-	payload = make([]byte, size)
+	take := size
+	if take > amqpMaxCapture {
+		take = amqpMaxCapture
+	}
+	payload = make([]byte, take)
 	if _, err = io.ReadFull(br, payload); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, 0, err
+	}
+	if _, err = io.CopyN(io.Discard, br, int64(size-take)); err != nil {
+		return 0, 0, nil, 0, err
 	}
 	end, err := br.ReadByte()
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, 0, err
 	}
 	if end != amqpFrameEnd {
-		return 0, 0, nil, errAMQPFrame
+		return 0, 0, nil, 0, errAMQPFrame
 	}
-	return ftype, channel, payload, nil
+	return ftype, channel, payload, int(size), nil
 }
 
 // parseAMQPMethod splits a METHOD frame payload into class/method IDs + args.
