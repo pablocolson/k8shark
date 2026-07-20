@@ -12,12 +12,16 @@ export function StatsHeader({
   connected,
   onProtoClick,
   activeProto,
+  onStatusClick,
+  activeStatus,
 }: {
   stats: Stats | null;
   statsHistory: StatsPoint[];
   connected: boolean;
   onProtoClick?: (proto: string) => void;
   activeProto?: string | null;
+  onStatusClick?: (status: string) => void;
+  activeStatus?: string | null;
 }) {
   const { theme, toggleTheme } = useTheme();
   const { workers, setCapturePaused } = useWorkers();
@@ -42,9 +46,16 @@ export function StatsHeader({
       {stats && (
         <div className="status-chips">
           {STATUS_ORDER.filter((s) => stats.byStatus[s]).map((s) => (
-            <span key={s} className={`status-chip st-${s}`}>
+            <button
+              key={s}
+              type="button"
+              className={`status-chip st-${s}${activeStatus === s ? " active" : ""}`}
+              onClick={() => onStatusClick?.(s)}
+              title={`Filter: status == ${s}`}
+              aria-pressed={activeStatus === s}
+            >
               {fmt(stats.byStatus[s])} {s}
-            </span>
+            </button>
           ))}
         </div>
       )}

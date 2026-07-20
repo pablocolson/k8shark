@@ -96,10 +96,14 @@ body {
 .status-chip {
   font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 20px;
   border: 1px solid var(--border); background: #0e1320; color: var(--text-dim);
+  cursor: pointer; line-height: 1.5;
+  transition: background 0.12s ease;
 }
 .status-chip.st-success { color: var(--ok); border-color: rgba(55, 201, 139, 0.35); }
 .status-chip.st-warning { color: var(--warn); border-color: rgba(255, 180, 84, 0.35); }
 .status-chip.st-error { color: var(--err); border-color: rgba(255, 107, 107, 0.35); }
+.status-chip:hover { background: var(--hover-bg); }
+.status-chip.active { background: #1c2740; }
 .proto-pills { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
@@ -415,6 +419,7 @@ table.kv.rec .kv-k { width: 68px; color: var(--accent); }
 /* ---------- focus-visible ---------- */
 .icon-btn:focus-visible,
 .pill:focus-visible,
+.status-chip:focus-visible,
 .chip:focus-visible,
 .tab:focus-visible,
 .toggle:focus-visible,

@@ -13,26 +13,28 @@ import type { Entry } from "./types";
 type View = "list" | "map";
 
 const PROTO_CLAUSE_RE = /\bprotocol\s*==\s*"?([\w.-]+)"?/i;
+const STATUS_CLAUSE_RE = /\bstatus\s*==\s*"?([\w.-]+)"?/i;
 
-// Extracts the protocol a "protocol == x" clause pins the filter to, wherever
-// it appears in the expression (not just when it's the whole filter).
-function activeProtocol(filter: string): string | null {
-  const m = filter.match(PROTO_CLAUSE_RE);
+// Extracts the value a "<field> == x" clause (matched by re) pins the filter
+// to, wherever it appears in the expression (not just when it's the whole
+// filter) — shared by the protocol pills and the status chips.
+function activeFieldValue(filter: string, re: RegExp): string | null {
+  const m = filter.match(re);
   return m ? m[1] : null;
 }
 
-// Toggles a "protocol == x" clause: adds it (joined with "and") if absent,
-// swaps the value if a different protocol is already pinned, or removes it —
-// plus one adjacent connective — if it's already the active one. Preserves
-// the rest of a compound filter instead of clobbering it.
-function toggleProtoFilter(filter: string, proto: string): string {
-  const m = PROTO_CLAUSE_RE.exec(filter);
+// Toggles a "<field> == value" clause matched by re: adds it (joined with
+// "and") if absent, swaps the value if a different one is already pinned, or
+// removes it — plus one adjacent connective — if it's already the active
+// one. Preserves the rest of a compound filter instead of clobbering it.
+function toggleFieldFilter(filter: string, re: RegExp, field: string, value: string): string {
+  const m = re.exec(filter);
   if (!m) {
     const trimmed = filter.trim();
-    return trimmed ? `${trimmed} and protocol == ${proto}` : `protocol == ${proto}`;
+    return trimmed ? `${trimmed} and ${field} == ${value}` : `${field} == ${value}`;
   }
-  if (m[1].toLowerCase() !== proto.toLowerCase()) {
-    return filter.slice(0, m.index) + `protocol == ${proto}` + filter.slice(m.index + m[0].length);
+  if (m[1].toLowerCase() !== value.toLowerCase()) {
+    return filter.slice(0, m.index) + `${field} == ${value}` + filter.slice(m.index + m[0].length);
   }
   const before = filter.slice(0, m.index).replace(/\s*\b(and|or)\s*$/i, "").trimEnd();
   const after = filter.slice(m.index + m[0].length).replace(/^\s*\b(and|or)\s*/i, "").trimStart();
@@ -89,11 +91,16 @@ export function App() {
     history.replaceState(null, "", qs ? `${location.pathname}?${qs}` : location.pathname);
   }, [filter, view, selected]);
 
-  const activeProto = useMemo(() => activeProtocol(filter), [filter]);
+  const activeProto = useMemo(() => activeFieldValue(filter, PROTO_CLAUSE_RE), [filter]);
+  const activeStatus = useMemo(() => activeFieldValue(filter, STATUS_CLAUSE_RE), [filter]);
 
-  // Click a protocol pill to add/swap/remove its clause in the filter.
+  // Click a protocol pill / status chip to add/swap/remove its clause in the
+  // filter.
   const onProtoClick = (proto: string) => {
-    onApply(toggleProtoFilter(filter, proto));
+    onApply(toggleFieldFilter(filter, PROTO_CLAUSE_RE, "protocol", proto));
+  };
+  const onStatusClick = (status: string) => {
+    onApply(toggleFieldFilter(filter, STATUS_CLAUSE_RE, "status", status));
   };
 
   // Global shortcuts: "/" focuses the filter (unless already typing
@@ -132,6 +139,8 @@ export function App() {
         connected={hub.connected}
         onProtoClick={onProtoClick}
         activeProto={activeProto}
+        onStatusClick={onStatusClick}
+        activeStatus={activeStatus}
       />
       <FilterBar
         value={filter}
