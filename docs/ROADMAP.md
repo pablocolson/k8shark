@@ -93,11 +93,65 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   démo réel : survol → tooltip, glisser-déposer → snapshot historique
   chargé, retour au live → flux repris normalement.
 
-**Phase 2 est maintenant terminée (9/9).** Prochain chantier logique : les
-items S/M restants hors Phase 2/3 (ex. **DIS-5**, sniff Redis/Postgres/AMQP
-sur ports non standard) ou le démarrage de la **Phase 3** (gros chantiers :
-DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1 tap
-targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
+**Phase 2 est maintenant terminée (9/9).**
+
+**Backlog (hors phases) — 7 items traités (commits `f9835b3`, `18ee665`,
+`47144f6`) :**
+
+- **DIS-5** : `consumeStreamID` content-sniffe désormais le flux (réutilise
+  `sniffTLS`, renommé `consumeSniffedID` puisqu'il ne sert plus seulement au
+  chemin eBPF TLS) quand aucun port bien connu ne matche, au lieu de tomber
+  dans le sniff HTTP par défaut — Redis/Postgres/AMQP exposés sur un port
+  remappé (fréquent en k8s) sont maintenant reconnus. Vérifié par
+  `TestConsumeStreamNonStandardPortSniffsRedis` +
+  `TestConsumeStreamNonStandardPortFallsBackToHTTP` (régression HTTP).
+- **HUB-9** : `Server.gcWorkers()` purge du registre `/api/workers` les
+  workers déconnectés dont `LastSeen` dépasse `workerGCTTL` (1h), appelé
+  depuis le ticker 2s existant de `statsLoop` ; un worker toujours connecté
+  n'est jamais purgé.
+- **HUB-10** : `facetIndex` résout chaque `fieldGetter` une seule fois dans
+  `newFacetIndex` (stocké dans `fieldCounter.get`) au lieu de re-traverser le
+  switch de `filter.go` à chaque entrée ingérée pour chacun des ~45 champs
+  suivis.
+- **HUB-5** : `/metrics` expose maintenant
+  `k8shark_hub_entries_by_protocol_total{protocol=...}`,
+  `..._by_status_total{status=...}`, `..._buffer_entries`,
+  `..._buffer_capacity`, `..._entries_per_sec`, et un nouveau
+  `k8shark_hub_k8s_enrich_failures_total` (le resolver k8s compte désormais
+  ses cycles de refresh échoués).
+- **HUB-7** : `GET /api/entries?sort=<champ numérique>&order=asc|desc` (défaut
+  desc), implémenté via un tas borné à `limit` (`internal/hub/sort.go`,
+  O(n log limit)) plutôt qu'un tri complet du buffer ; rejette les champs non
+  numériques (`response.status`, `elapsedMs`, etc. seulement).
+- **DIS-12** : nouveaux champs de filtre `request.header.<nom>` /
+  `response.header.<nom>` (résolution par préfixe dans `fieldGetter`), plus
+  autocomplete : `facetIndex` suit désormais les noms d'en-tête observés et
+  `handleFields` les expose comme entrées de catalogue synthétiques — aucun
+  changement front nécessaire, `/api/fields` étant déjà consommé
+  génériquement par `FilterSuggest`.
+- **UI-9** : les chips de statut (success/warning/error) de `StatsHeader`
+  sont maintenant des boutons qui togglent `status == x`, en généralisant le
+  mécanisme add/swap/remove de `toggleProtoFilter` (`App.tsx`) — renommé
+  `toggleFieldFilter`, paramétré par champ — aux pilules protocole comme aux
+  chips de statut.
+
+  Vérifié en conditions réelles (`make dev` + navigateur headless) au
+  2026-07-20 : `/api/fields` liste bien `request.header.accept`,
+  `request.header.user-agent`, `response.header.content-type` observés sur du
+  trafic démo réel ; clic sur le chip "error" → filtre `status == error` +
+  état actif, clic sur "warning" → swap (pas d'ajout), reclic → suppression de
+  la clause ; autocomplete du FilterBar propose bien les champs
+  `request.header.*` en tapant `request.hea`. Côté Go : `gofmt`/`go
+  vet`/`go build`/`go test ./...` et côté UI `tsc -b`/`vitest run` (89
+  tests)/`npm run build`, tous propres.
+
+Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-3/4/6,
+UI-5/6/7/8/10/11, MCP-1/4/5/6/7/8, OPS-6/7/8/9/10, SEC-5/6/7/8/9,
+TST-2/3/5/6/7/8, EXT-2/3/4/5.
+Prochain chantier logique : d'autres items S/M de ce backlog, ou le démarrage
+de la **Phase 3** (gros chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls,
+HUB-1 persistance, EXT-1 tap targeting, OPS-2/OPS-3 release automatisée +
+arm64 — voir plus bas).
 
 ## Phases proposées
 
