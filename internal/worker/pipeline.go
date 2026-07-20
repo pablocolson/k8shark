@@ -31,6 +31,8 @@ const (
 	pgPort    = 5432
 	amqpPort  = 5672
 	dnsPort   = 53
+	mysqlPort = 3306
+	mongoPort = 27017
 )
 
 // pipeline turns reassembled TCP streams and UDP datagrams into paired L7
@@ -45,8 +47,9 @@ type pipeline struct {
 	seq atomic.Uint64
 
 	mu    sync.Mutex
-	conns map[string]*connState // request/response pairing, keyed by canonical conn
-	dns   map[string]*dnsPending
+	conns map[string]*connState    // request/response pairing, keyed by canonical conn
+	dns   map[string]*dnsPending   // DNS query pairing, keyed by client+message-id
+	mongo map[string]*mongoPending // MongoDB pairing, keyed by conn+requestID (see dissect_mongo.go)
 
 	redisDB map[string]*redisDBState // per-connection Redis DB index (tracked from SELECT n), guarded by mu
 
@@ -91,6 +94,7 @@ func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
 		log:           log,
 		conns:         map[string]*connState{},
 		dns:           map[string]*dnsPending{},
+		mongo:         map[string]*mongoPending{},
 		redisDB:       map[string]*redisDBState{},
 		flows:         map[string]*flowState{},
 		respPorts:     map[int]api.Protocol{redisPort: api.ProtocolRedis},
@@ -396,6 +400,10 @@ func (p *pipeline) consumeStreamID(c connID, r io.Reader) {
 	switch {
 	case dst == pgPort || src == pgPort:
 		p.consumePostgresID(c, r, dst == pgPort)
+	case dst == mysqlPort || src == mysqlPort:
+		p.consumeMySQLID(c, r, dst == mysqlPort)
+	case dst == mongoPort || src == mongoPort:
+		p.consumeMongoID(c, r, dst == mongoPort)
 	case dst == dnsPort || src == dnsPort:
 		p.consumeDNSTCPID(c, r, dst == dnsPort)
 	default:
@@ -904,6 +912,11 @@ func (p *pipeline) gc() {
 	for k, d := range p.dns {
 		if d.ts.Before(cutoff) {
 			delete(p.dns, k)
+		}
+	}
+	for k, m := range p.mongo {
+		if m.ts.Before(cutoff) {
+			delete(p.mongo, k)
 		}
 	}
 	for k, cs := range p.conns {

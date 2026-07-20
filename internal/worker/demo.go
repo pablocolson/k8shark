@@ -64,6 +64,20 @@ var pgQueries = []string{
 	"DELETE FROM sessions WHERE expires_at < now()",
 	"SELECT count(*) FROM products",
 }
+var mysqlQueriesDemo = []string{
+	"SELECT * FROM orders WHERE id = 4821",
+	"INSERT INTO carts (user_id, sku) VALUES (7, 'A1')",
+	"UPDATE inventory SET qty = qty - 1 WHERE sku = 'A1'",
+	"SELECT id, email FROM users WHERE active = 1",
+	"DELETE FROM sessions WHERE expires_at < NOW()",
+}
+var mongoOpsDemo = []struct{ command, collection string }{
+	{"find", "orders"},
+	{"insert", "carts"},
+	{"update", "inventory"},
+	{"aggregate", "products"},
+	{"delete", "sessions"},
+}
 
 // runDemo emits synthetic entries to the sink at roughly rps until stopped.
 func runDemo(s *sink, node string, rps int, stop <-chan struct{}) {
@@ -184,6 +198,10 @@ func genEntry(rnd *rand.Rand, node string, seq int64) *api.Entry {
 		}
 	case 4: // L4 flows: generic tcp/udp/icmp
 		genL4(rnd, e)
+	case 6: // MySQL
+		genMySQL(rnd, e)
+	case 7: // MongoDB
+		genMongo(rnd, e)
 	case 5: // AMQP (RabbitMQ 0-9-1)
 		op := amqpOps[rnd.Intn(len(amqpOps))]
 		e.Protocol = api.ProtocolAMQP
@@ -385,9 +403,10 @@ var l4Targets = []struct {
 	port         int
 	proto        api.Protocol
 }{
-	{"mysql", "platform", "10.0.2.30", 3306, api.ProtocolTCP},
+	// mysql (3306) and mongodb (27017) are now emitted as dissected
+	// ProtocolMySQL/ProtocolMongo entries (see genMySQL/genMongo); kafka stays a
+	// generic flow until DIS-8.
 	{"kafka", "platform", "10.0.2.31", 9092, api.ProtocolTCP},
-	{"mongodb", "platform", "10.0.2.32", 27017, api.ProtocolTCP},
 	{"gateway", "platform", "10.0.2.1", 443, api.ProtocolTCP},
 	{"statsd", "platform", "10.0.2.33", 8125, api.ProtocolUDP},
 	{"ntp", "kube-system", "10.0.0.5", 123, api.ProtocolUDP},
@@ -428,6 +447,50 @@ func genL4(rnd *rand.Rand, e *api.Entry) {
 	e.Destination = api.Endpoint{IP: t.ip, Port: t.port, Name: t.name, Namespace: t.ns}
 	e.Request = api.Payload{Summary: label, Packets: pkts, Bytes: bytes, Flags: flags}
 	e.Response = api.Payload{Summary: reason + " · " + humanBytes(bytes) + " · " + strconv.FormatInt(pkts, 10) + " pkts"}
+}
+
+// genMySQL fills e with a synthetic MySQL query interaction (DIS-11).
+func genMySQL(rnd *rand.Rand, e *api.Entry) {
+	q := mysqlQueriesDemo[rnd.Intn(len(mysqlQueriesDemo))]
+	e.Protocol = api.ProtocolMySQL
+	e.Destination = api.Endpoint{IP: "10.0.2.30", Port: 3306, Name: "mysql", Namespace: "platform"}
+	e.Request = api.Payload{
+		Query: q, Summary: q,
+		MySQL: &api.MySQLDetail{Command: "COM_QUERY"},
+	}
+	if rnd.Intn(20) == 0 {
+		e.Response = api.Payload{
+			Summary: "ERROR 1146: Table 'shop.nope' doesn't exist",
+			MySQL:   &api.MySQLDetail{ErrorCode: 1146, ErrorMessage: "Table 'shop.nope' doesn't exist"},
+		}
+		e.Status, e.StatusCode = "error", 0
+		return
+	}
+	rows := rnd.Intn(50)
+	e.Response = api.Payload{Summary: strconv.Itoa(rows) + " rows", RowCount: rows}
+	e.Status, e.StatusCode = "success", 0
+}
+
+// genMongo fills e with a synthetic MongoDB command interaction (DIS-11).
+func genMongo(rnd *rand.Rand, e *api.Entry) {
+	op := mongoOpsDemo[rnd.Intn(len(mongoOpsDemo))]
+	summary := op.command + " " + op.collection
+	e.Protocol = api.ProtocolMongo
+	e.Destination = api.Endpoint{IP: "10.0.2.32", Port: 27017, Name: "mongodb", Namespace: "platform"}
+	e.Request = api.Payload{
+		Query: summary, Summary: summary,
+		Mongo: &api.MongoDetail{Command: op.command, Collection: op.collection, Database: "shop"},
+	}
+	if rnd.Intn(20) == 0 {
+		e.Response = api.Payload{
+			Summary: "not authorized on shop to execute command",
+			Mongo:   &api.MongoDetail{ErrMsg: "not authorized on shop to execute command"},
+		}
+		e.Status, e.StatusCode = "error", 0
+		return
+	}
+	e.Response = api.Payload{Summary: "ok", Mongo: &api.MongoDetail{OK: true}}
+	e.Status, e.StatusCode = "success", 0
 }
 
 // pgDemoTag builds a plausible CommandComplete tag from a demo SQL statement.

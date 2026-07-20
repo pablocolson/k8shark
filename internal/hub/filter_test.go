@@ -233,6 +233,58 @@ func TestCompileFilterAMQP(t *testing.T) {
 	}
 }
 
+// mongo.collection / mongo.command resolve against the OP_MSG-extracted
+// MongoDetail; mysql.command / mysql.error against the MySQLDetail, and MySQL
+// SQL text via the shared query field (DIS-11).
+func TestCompileFilterMongoAndMySQL(t *testing.T) {
+	mongo := &api.Entry{
+		Protocol: api.ProtocolMongo,
+		Status:   "error",
+		Request:  api.Payload{Query: "find users", Summary: "find users", Mongo: &api.MongoDetail{Command: "find", Collection: "users", Database: "shop"}},
+		Response: api.Payload{Summary: "not authorized", Mongo: &api.MongoDetail{ErrMsg: "not authorized"}},
+	}
+	mysql := &api.Entry{
+		Protocol: api.ProtocolMySQL,
+		Status:   "error",
+		Request:  api.Payload{Query: "SELECT id FROM users", Summary: "SELECT id FROM users", MySQL: &api.MySQLDetail{Command: "COM_QUERY"}},
+		Response: api.Payload{Summary: "ERROR 1146", MySQL: &api.MySQLDetail{ErrorCode: 1146, ErrorMessage: "Table doesn't exist"}},
+	}
+	cases := []struct {
+		e    *api.Entry
+		expr string
+		want bool
+	}{
+		{mongo, `protocol == "mongodb"`, true},
+		{mongo, `mongo.collection == "users"`, true},
+		{mongo, `mongo.collection == "orders"`, false},
+		{mongo, `mongo.collection contains "use"`, true},
+		{mongo, `mongo.command == "find"`, true},
+		{mongo, `"find users"`, true}, // full-text via query/summary
+		{mysql, `protocol == "mysql"`, true},
+		{mysql, `mysql.command == "COM_QUERY"`, true},
+		{mysql, `mysql.error == 1146`, true},
+		{mysql, `mysql.error > 1000`, true},
+		{mysql, `query contains "users"`, true}, // shared SQL text field
+		{mysql, `sql contains "SELECT"`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(c.e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	// mongo.collection is empty (never matches) on a non-mongo entry.
+	pred, _ := CompileFilter(`mongo.collection == "users"`)
+	if pred(&api.Entry{Protocol: api.ProtocolHTTP}) {
+		t.Error("mongo.collection matched a non-MongoDB entry")
+	}
+}
+
 // ws.opcode resolves against a post-101 WebSocket frame entry (DIS-6).
 func TestCompileFilterWebSocket(t *testing.T) {
 	e := &api.Entry{

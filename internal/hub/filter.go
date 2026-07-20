@@ -573,6 +573,37 @@ func fieldGetter(field string) func(*api.Entry) string {
 			}
 			return ""
 		}
+
+	// --- MySQL / MongoDB (DIS-11) -----------------------------------------
+	// MySQL SQL text reuses the shared query/sql getter above (Request.Query).
+	case "mysql.command":
+		return func(e *api.Entry) string {
+			if e.Request.MySQL != nil {
+				return e.Request.MySQL.Command
+			}
+			return ""
+		}
+	case "mysql.error":
+		return func(e *api.Entry) string {
+			if e.Response.MySQL != nil && e.Response.MySQL.ErrorCode != 0 {
+				return strconv.Itoa(e.Response.MySQL.ErrorCode)
+			}
+			return ""
+		}
+	case "mongo.collection":
+		return func(e *api.Entry) string {
+			if e.Request.Mongo != nil {
+				return e.Request.Mongo.Collection
+			}
+			return ""
+		}
+	case "mongo.command":
+		return func(e *api.Entry) string {
+			if e.Request.Mongo != nil {
+				return e.Request.Mongo.Command
+			}
+			return ""
+		}
 	case "l4.ttl":
 		return func(e *api.Entry) string { return l4Int(e, func(l *api.L4Info) int { return l.TTL }) }
 	case "l4.retransmits":

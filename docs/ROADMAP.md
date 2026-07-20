@@ -629,11 +629,42 @@ marshals :**
   `go test -race ./...` (0 échec) + `vitest`/`build` (105) + `helm lint`
   propres.
 
-Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/11,
+**Backlog, lot 16 — DIS-11, dissecteurs MySQL et MongoDB :**
+
+- **DIS-11** : prérequis critique traité — `capturePorts()` (worker.go)
+  admet désormais 3306 et 27017 dans le filtre BPF kernel (sans quoi ces
+  paquets n'atteignaient jamais l'userspace). Dispatch dans
+  `consumeStreamID` (3306 → `consumeMySQLID`, 27017 → `consumeMongoID`).
+  MySQL (`dissect_mysql.go`) : paquets séquencés, COM_QUERY/PREPARE
+  (texte SQL) / EXECUTE, réponses OK / ERR (code+message) / result-set
+  (nombre de lignes), appariement FIFO façon Postgres, greeting+auth
+  ignorés, upgrade CLIENT_SSL détecté et arrêté proprement, deux dialectes
+  de result-set (`CLIENT_DEPRECATE_EOF` et legacy), allocations bornées.
+  MongoDB (`dissect_mongo.go`) : OP_MSG (2013) section 0 + legacy
+  OP_QUERY/OP_REPLY, appariement exact par requestID/responseTo, décodeur
+  BSON borné profondeur-1 (`scanBSON`, jamais de panique sur troncature)
+  extrayant commande/collection/$db et ok/errmsg. Contrat : `ProtocolMySQL`
+  / `ProtocolMongo` + sous-objets additifs `MySQLDetail`/`MongoDetail`.
+  Filtres `mysql.command`/`mysql.error`/`mongo.collection`/`mongo.command`
+  (getter + facets, `mysql`/`mongodb` ajoutés à l'enum protocol). Démo :
+  entrées MySQL/Mongo réellement dissectées (kafka reste flow générique,
+  DIS-8). UI : couleurs `PROTO_COLORS` + cas EntryDetail. Simplifications
+  documentées : MySQL ne modèle que les commandes à réponse connue (limite
+  FIFO héritée de Postgres), extraction Mongo top-level. Tests
+  `TestMySQLPairingEndToEnd`, `TestMySQLSSLUpgradeStopsCleanly`,
+  `TestMySQLTruncatedNoPanic`, `TestMongoOpMsgPairing`,
+  `TestMongoTruncatedNoPanic`, `TestCompileFilterMongoAndMySQL`.
+
+  Vérifié en réel au 2026-07-20 : démo montre mysql/mongodb dissectés
+  (query + rowCount MySQL, `mongo.collection == "orders"` matche), champs
+  dans `/api/fields`. `make lint`/`go test -race ./...` (0 échec)/`vitest`
+  (105)/`build` propres.
+
+Reste du backlog hors Phase 3 : CAP-7/8, DIS-8,
 OPS-10, TST-8, EXT-2 (EXT-5 fait sauf screenshots/GIF).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo),
-EXT-2 (ingestion PCAP hors-ligne), OPS-10/TST-8 (durcissement CI),
+Prochain chantier logique : DIS-8 (dissecteur Kafka), EXT-2 (ingestion PCAP
+hors-ligne), OPS-10/TST-8 (durcissement CI),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

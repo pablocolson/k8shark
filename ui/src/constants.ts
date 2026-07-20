@@ -4,6 +4,8 @@ export const PROTO_COLORS: Record<string, string> = {
   redis: "#ff6b6b",
   valkey: "#5a9e6f",
   postgres: "#22c3dd",
+  mysql: "#d6608a",
+  mongodb: "#2ecc71",
   amqp: "#ff8c42",
   ws: "#e6c84f",
   tcp: "#7a8699",

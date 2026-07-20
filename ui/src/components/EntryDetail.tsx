@@ -241,6 +241,18 @@ function OverviewTab({ entry }: { entry: Entry }) {
     push(rows, "tx", rs.postgres?.txStatus);
     push(rows, "rows", rs.rowCount);
     push(rows, "error", rs.postgres?.error?.code);
+  } else if (proto === "mysql") {
+    push(rows, "query", rq.query);
+    push(rows, "command", rq.mysql?.command);
+    push(rows, "rows", rs.rowCount);
+    push(rows, "error code", rs.mysql?.errorCode);
+    push(rows, "error", rs.mysql?.errorMessage);
+  } else if (proto === "mongodb") {
+    push(rows, "command", rq.mongo?.command);
+    push(rows, "collection", rq.mongo?.collection);
+    push(rows, "database", rq.mongo?.database);
+    push(rows, "ok", rs.mongo?.ok ? "yes" : undefined);
+    push(rows, "error", rs.mongo?.errmsg);
   } else if (proto === "amqp") {
     push(rows, "class", rq.class);
     push(rows, "method", rq.method);
@@ -303,6 +315,24 @@ function MessageTab({
     } else {
       push(rows, "reply", p.redis?.reply);
       push(rows, "reply type", p.redis?.replyType);
+    }
+  } else if (protocol === "mysql") {
+    if (side === "request") {
+      push(rows, "query", p.query);
+      push(rows, "command", p.mysql?.command);
+    } else {
+      push(rows, "rows", p.rowCount);
+      push(rows, "error code", p.mysql?.errorCode);
+      push(rows, "error", p.mysql?.errorMessage);
+    }
+  } else if (protocol === "mongodb") {
+    if (side === "request") {
+      push(rows, "command", p.mongo?.command);
+      push(rows, "collection", p.mongo?.collection);
+      push(rows, "database", p.mongo?.database);
+    } else {
+      push(rows, "ok", p.mongo?.ok ? "yes" : undefined);
+      push(rows, "error", p.mongo?.errmsg);
     }
   } else if (protocol === "dns" && side === "response") {
     push(rows, "rcode", p.dns?.rcode);

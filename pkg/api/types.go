@@ -14,11 +14,13 @@ const (
 	ProtocolRedis    Protocol = "redis"
 	ProtocolValkey   Protocol = "valkey" // Redis-compatible RESP; distinguished only by config
 	ProtocolPostgres Protocol = "postgres"
-	ProtocolAMQP     Protocol = "amqp" // RabbitMQ / AMQP 0-9-1
-	ProtocolWS       Protocol = "ws"   // WebSocket frames after an HTTP 101 Upgrade (RFC 6455)
-	ProtocolTCP      Protocol = "tcp"  // generic L4 flow (undissected TCP)
-	ProtocolUDP      Protocol = "udp"  // generic L4 flow (non-DNS UDP)
-	ProtocolICMP     Protocol = "icmp" // ICMP echo / errors
+	ProtocolMySQL    Protocol = "mysql"   // MySQL / MariaDB client-server protocol
+	ProtocolMongo    Protocol = "mongodb" // MongoDB wire protocol (label matches wellKnownPorts)
+	ProtocolAMQP     Protocol = "amqp"    // RabbitMQ / AMQP 0-9-1
+	ProtocolWS       Protocol = "ws"      // WebSocket frames after an HTTP 101 Upgrade (RFC 6455)
+	ProtocolTCP      Protocol = "tcp"     // generic L4 flow (undissected TCP)
+	ProtocolUDP      Protocol = "udp"     // generic L4 flow (non-DNS UDP)
+	ProtocolICMP     Protocol = "icmp"    // ICMP echo / errors
 )
 
 // Endpoint is one side of a captured conversation.
@@ -57,7 +59,8 @@ type Payload struct {
 	// Redis
 	Command string `json:"command,omitempty"`
 
-	// Postgres
+	// Postgres / MySQL (both surface SQL text via Query and result rows via
+	// RowCount, so those scalars are shared).
 	Query    string `json:"query,omitempty"`
 	RowCount int    `json:"rowCount,omitempty"`
 
@@ -96,6 +99,8 @@ type Payload struct {
 	DNS         *DNSDetail   `json:"dns,omitempty"`
 	Redis       *RedisDetail `json:"redis,omitempty"`
 	Postgres    *PGDetail    `json:"postgres,omitempty"`
+	MySQL       *MySQLDetail `json:"mysql,omitempty"`
+	Mongo       *MongoDetail `json:"mongo,omitempty"`
 }
 
 // L4Info is connection-level L2/L3/L4 metadata, captured from the packet
@@ -212,6 +217,28 @@ type PGDetail struct {
 	Tag           string     `json:"tag,omitempty"`     // CommandComplete tag
 	Error         *PGError   `json:"error,omitempty"`
 	TxStatus      string     `json:"txStatus,omitempty"` // "I"|"T"|"E" from ReadyForQuery
+}
+
+// MySQLDetail is the rich MySQL request/response extras (DIS-11).
+type MySQLDetail struct {
+	// Command is the client command name on the request side
+	// ("COM_QUERY"|"COM_STMT_PREPARE"|"COM_STMT_EXECUTE"|...); the SQL text
+	// itself reuses the shared Payload.Query field.
+	Command string `json:"command,omitempty"`
+	// ErrorCode/ErrorMessage decode an ERR packet on the response side.
+	ErrorCode    int    `json:"errorCode,omitempty"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
+// MongoDetail is the rich MongoDB request/response extras (DIS-11). The command
+// name + collection are extracted from the OP_MSG section-0 BSON document on the
+// request side; ok/errmsg from the reply document on the response side.
+type MongoDetail struct {
+	Command    string `json:"command,omitempty"`    // "find"|"insert"|"update"|"delete"|"aggregate"|...
+	Collection string `json:"collection,omitempty"` // target collection (filter field mongo.collection)
+	Database   string `json:"database,omitempty"`   // $db
+	OK         bool   `json:"ok,omitempty"`         // response ok:1 (false on error/ok:0)
+	ErrMsg     string `json:"errmsg,omitempty"`     // response error message
 }
 
 // Entry is a single captured L7 interaction. It is the atomic unit streamed

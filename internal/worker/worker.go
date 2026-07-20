@@ -245,7 +245,10 @@ var defaultHTTPPorts = []int{80, 8080}
 // or any dissector sees it — so this must stay a superset of every port
 // buildRespPorts/buildAMQPPorts/consumeStream's HTTP fallback can dispatch.
 func capturePorts(opts Options) capture.Ports {
-	tcp := map[int]bool{redisPort: true, pgPort: true, amqpPort: true, dnsPort: true}
+	tcp := map[int]bool{
+		redisPort: true, pgPort: true, amqpPort: true, dnsPort: true,
+		mysqlPort: true, mongoPort: true,
+	}
 	for _, p := range defaultHTTPPorts {
 		tcp[p] = true
 	}

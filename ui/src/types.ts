@@ -6,6 +6,8 @@ export type Protocol =
   | "redis"
   | "valkey"
   | "postgres"
+  | "mysql"
+  | "mongodb"
   | "amqp"
   | "ws"
   | "tcp"
@@ -122,6 +124,20 @@ export interface PGDetail {
   txStatus?: string;
 }
 
+export interface MySQLDetail {
+  command?: string;
+  errorCode?: number;
+  errorMessage?: string;
+}
+
+export interface MongoDetail {
+  command?: string;
+  collection?: string;
+  database?: string;
+  ok?: boolean;
+  errmsg?: string;
+}
+
 export interface Payload {
   summary?: string;
   headers?: Record<string, string>;
@@ -156,6 +172,8 @@ export interface Payload {
   dns?: DNSDetail;
   redis?: RedisDetail;
   postgres?: PGDetail;
+  mysql?: MySQLDetail;
+  mongo?: MongoDetail;
 }
 
 export interface Entry {

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -1575,4 +1576,246 @@ func pendingCount(p *pipeline, key string) int {
 		return len(cs.reqs)
 	}
 	return 0
+}
+
+// --- DIS-11: MySQL ----------------------------------------------------------
+
+// appendU32LE / appendU64LE append little-endian integers (MySQL and BSON are
+// both little-endian, unlike the big-endian appendU16/appendU32 above).
+func appendU32LE(b []byte, v uint32) []byte {
+	return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+func appendU64LE(b []byte, v uint64) []byte {
+	return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
+
+// mysqlPacket frames a payload with the 3-byte little-endian length + 1-byte
+// sequence id MySQL header.
+func mysqlPacket(seq byte, payload []byte) []byte {
+	n := len(payload)
+	return append([]byte{byte(n), byte(n >> 8), byte(n >> 16), seq}, payload...)
+}
+
+func comQueryPacket(sql string) []byte {
+	return mysqlPacket(0, append([]byte{comQuery}, sql...))
+}
+
+// A full MySQL flow — server greeting + auth OK skipped, then COM_QUERY paired
+// with a result set, an OK (affected rows), and an ERR — pairs correctly and
+// surfaces the SQL text, row count and error.
+func TestMySQLPairingEndToEnd(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40400, mysqlPort)
+
+	// Request direction: a (skipped) handshake response at seq 1, then three
+	// command-phase COM_QUERY packets at seq 0.
+	var req []byte
+	req = append(req, mysqlPacket(1, make([]byte, 40))...) // HandshakeResponse (skipped)
+	req = append(req, comQueryPacket("SELECT id FROM t")...)
+	req = append(req, comQueryPacket("UPDATE t SET x=1")...)
+	req = append(req, comQueryPacket("SELECT * FROM nope")...)
+
+	// Response direction: greeting + auth OK (both skipped), then the three
+	// command responses in order.
+	var resp []byte
+	resp = append(resp, mysqlPacket(0, append([]byte{0x0a}, "8.0.32\x00rest"...))...)        // greeting
+	resp = append(resp, mysqlPacket(2, []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00})...) // auth OK
+	// Result set for SELECT id FROM t: 1 column, 2 rows (DEPRECATE_EOF dialect).
+	resp = append(resp, mysqlPacket(1, []byte{0x01})...)                                     // column count = 1
+	resp = append(resp, mysqlPacket(2, []byte{0x03, 'i', 'd', 'x'})...)                      // column definition
+	resp = append(resp, mysqlPacket(3, []byte{0x02, '4', '2'})...)                           // row 1
+	resp = append(resp, mysqlPacket(4, []byte{0x02, '4', '3'})...)                           // row 2
+	resp = append(resp, mysqlPacket(5, []byte{0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00})...) // OK terminator (7 bytes)
+	// OK for the UPDATE: affected rows = 3.
+	resp = append(resp, mysqlPacket(1, []byte{0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00})...)
+	// ERR for SELECT * FROM nope: code 1146, SQL state 42S02.
+	errPayload := append([]byte{0xff, 0x7a, 0x04, '#'}, "42S02Table 'shop.nope' doesn't exist"...)
+	resp = append(resp, mysqlPacket(1, errPayload)...)
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+	p.consumeStream(sNet, sTr, strings.NewReader(string(resp)))
+
+	got := drain(s)
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3", len(got))
+	}
+	if got[0].Protocol != api.ProtocolMySQL || got[0].Request.Query != "SELECT id FROM t" {
+		t.Errorf("entry0 request = %+v", got[0].Request)
+	}
+	if got[0].Response.RowCount != 2 || got[0].Response.Summary != "2 rows" {
+		t.Errorf("entry0 response = %+v, want 2 rows", got[0].Response)
+	}
+	if got[1].Request.Query != "UPDATE t SET x=1" || got[1].Response.RowCount != 3 {
+		t.Errorf("entry1 = req %q resp %+v", got[1].Request.Query, got[1].Response)
+	}
+	if got[2].Status != "error" {
+		t.Errorf("entry2 status = %q, want error", got[2].Status)
+	}
+	if got[2].Response.MySQL == nil || got[2].Response.MySQL.ErrorCode != 1146 {
+		t.Fatalf("entry2 error detail = %+v", got[2].Response.MySQL)
+	}
+	if !strings.Contains(got[2].Response.MySQL.ErrorMessage, "doesn't exist") {
+		t.Errorf("entry2 error message = %q", got[2].Response.MySQL.ErrorMessage)
+	}
+}
+
+// A CLIENT_SSL request (short handshake packet with the SSL capability bit) is
+// detected and the direction stopped cleanly rather than framing the following
+// TLS ciphertext as MySQL packets.
+func TestMySQLSSLUpgradeStopsCleanly(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, _, _ := flows(40404, mysqlPort)
+
+	var req []byte
+	// SSL request: seq 1, capability flags with CLIENT_SSL (0x0800) set, short.
+	sslCaps := appendU32LE(nil, clientSSLCapability)
+	sslReq := append(sslCaps, make([]byte, 28)...) // 32-byte SSL request, no username
+	req = append(req, mysqlPacket(1, sslReq)...)
+	// TLS ClientHello ciphertext follows — must NOT be emitted as anything.
+	req = append(req, 0x16, 0x03, 0x01, 0x00, 0x2c, 0x01, 0x00, 0x00, 0x28)
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+
+	if got := drain(s); len(got) != 0 {
+		t.Fatalf("got %d entries, want 0 after a TLS upgrade", len(got))
+	}
+}
+
+// Truncated / garbled MySQL streams must not panic and must emit nothing.
+func TestMySQLTruncatedNoPanic(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40405, mysqlPort)
+
+	for _, stream := range [][]byte{
+		{0x01},                              // can't even read the header
+		{0x10, 0x00, 0x00, 0x00, 0x03, 'S'}, // header claims 16 bytes, only 2 present
+		{0xff, 0xff, 0xff, 0x00, 0x03, 'x'}, // 16 MiB claim, truncated
+	} {
+		p.consumeStream(rNet, rTr, bytes.NewReader(stream)) // request side
+		p.consumeStream(sNet, sTr, bytes.NewReader(stream)) // response side
+	}
+	if got := drain(s); len(got) != 0 {
+		t.Errorf("got %d entries from garbled MySQL, want 0", len(got))
+	}
+}
+
+// --- DIS-11: MongoDB --------------------------------------------------------
+
+// bsonStrElem / bsonDblElem build single BSON string / double elements; bsonDoc
+// wraps elements into a length-prefixed, NUL-terminated document.
+func bsonStrElem(key, val string) []byte {
+	e := append([]byte{0x02}, key...)
+	e = append(e, 0x00)
+	e = appendU32LE(e, uint32(len(val)+1))
+	e = append(e, val...)
+	return append(e, 0x00)
+}
+func bsonDblElem(key string, v float64) []byte {
+	e := append([]byte{0x01}, key...)
+	e = append(e, 0x00)
+	return appendU64LE(e, math.Float64bits(v))
+}
+func bsonDoc(elems ...[]byte) []byte {
+	var body []byte
+	for _, e := range elems {
+		body = append(body, e...)
+	}
+	total := 4 + len(body) + 1
+	out := appendU32LE(nil, uint32(total))
+	out = append(out, body...)
+	return append(out, 0x00)
+}
+
+// mongoMsg frames a MsgHeader + body; opMsgMsg builds an OP_MSG carrying a
+// single section-0 command document.
+func mongoMsg(requestID, responseTo, opCode int32, body []byte) []byte {
+	total := 16 + len(body)
+	out := appendU32LE(nil, uint32(total))
+	out = appendU32LE(out, uint32(requestID))
+	out = appendU32LE(out, uint32(responseTo))
+	out = appendU32LE(out, uint32(opCode))
+	return append(out, body...)
+}
+func opMsgMsg(requestID, responseTo int32, doc []byte) []byte {
+	body := appendU32LE(nil, 0) // flagBits
+	body = append(body, 0x00)   // section kind 0 (body)
+	body = append(body, doc...)
+	return mongoMsg(requestID, responseTo, opMsg, body)
+}
+
+// OP_MSG find + insert requests pair by requestID/responseTo with an ok:1 reply
+// and an ok:0 + errmsg reply, surfacing collection/command and the error.
+func TestMongoOpMsgPairing(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40500, mongoPort)
+
+	req := opMsgMsg(100, 0, bsonDoc(bsonStrElem("find", "users"), bsonStrElem("$db", "shop")))
+	req = append(req, opMsgMsg(101, 0, bsonDoc(bsonStrElem("insert", "carts"), bsonStrElem("$db", "shop")))...)
+
+	resp := opMsgMsg(200, 100, bsonDoc(bsonDblElem("ok", 1.0)))
+	resp = append(resp, opMsgMsg(201, 101, bsonDoc(bsonDblElem("ok", 0.0), bsonStrElem("errmsg", "not authorized on shop")))...)
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+	p.consumeStream(sNet, sTr, strings.NewReader(string(resp)))
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	byColl := map[string]*api.Entry{}
+	for _, e := range got {
+		if e.Protocol != api.ProtocolMongo {
+			t.Errorf("protocol = %q, want mongodb", e.Protocol)
+		}
+		if e.Request.Mongo == nil {
+			t.Fatalf("entry has no request Mongo detail: %+v", e.Request)
+		}
+		byColl[e.Request.Mongo.Collection] = e
+	}
+	find := byColl["users"]
+	if find == nil || find.Request.Mongo.Command != "find" || find.Status != "success" {
+		t.Errorf("find entry = %+v", find)
+	}
+	ins := byColl["carts"]
+	if ins == nil || ins.Request.Mongo.Command != "insert" || ins.Status != "error" {
+		t.Fatalf("insert entry = %+v", ins)
+	}
+	if ins.Response.Mongo == nil || ins.Response.Mongo.ErrMsg != "not authorized on shop" {
+		t.Errorf("insert error = %+v", ins.Response.Mongo)
+	}
+}
+
+// Truncated / garbled MongoDB streams (short header, absurd message length,
+// truncated BSON) must not panic and must emit nothing.
+func TestMongoTruncatedNoPanic(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40501, mongoPort)
+
+	// A BSON doc whose string value claims far more bytes than are present.
+	badDoc := appendU32LE(nil, 40)
+	badDoc = append(badDoc, 0x02)
+	badDoc = append(badDoc, "find\x00"...)
+	badDoc = appendU32LE(badDoc, 99) // string claims 99 bytes
+	badDoc = append(badDoc, "us"...) // only 2 present
+	badDoc = append(badDoc, 0x00)
+
+	streams := [][]byte{
+		{0x05, 0x00},                            // can't read the 16-byte header
+		mongoMsg(1<<20, 0, opMsg, []byte{0x00}), // absurd message length
+		mongoMsg(16, 0, opMsg, nil),             // header only, empty body
+		opMsgMsg(7, 0, badDoc),                  // truncated BSON string
+	}
+	for _, stream := range streams {
+		p.consumeStream(rNet, rTr, bytes.NewReader(stream)) // request side
+		p.consumeStream(sNet, sTr, bytes.NewReader(stream)) // response side
+	}
+	if got := drain(s); len(got) != 0 {
+		t.Errorf("got %d entries from garbled MongoDB, want 0", len(got))
+	}
 }
