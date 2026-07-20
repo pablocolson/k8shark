@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pablocolson/k8shark/internal/config"
 	"github.com/pablocolson/k8shark/pkg/api"
@@ -24,6 +25,16 @@ import (
 
 // protocolVersion is the MCP revision this server speaks.
 const protocolVersion = "2024-11-05"
+
+// serverInstructions is returned from initialize to steer an agent toward an
+// efficient investigation order instead of pulling raw entries first.
+const serverInstructions = "Start with get_stats or get_traffic_summary for the current-state overview " +
+	"(counts, error rates, latency percentiles per workload/namespace) — cheaper and more informative than " +
+	"raw entries. Call list_filter_fields before writing a non-trivial IFL filter (unknown fields are " +
+	"rejected, not silently ignored). Use list_entries to dig into a specific slice once you know what " +
+	"you're looking for, and get_entry for one entry's full detail (headers, bodies, timings). " +
+	"find_error_clusters and diff_traffic answer \"what's failing\" and \"what changed\" directly, without " +
+	"needing to page through entries yourself."
 
 // Server exposes the hub REST API to an AI agent over MCP/stdio.
 type Server struct {
@@ -42,6 +53,11 @@ type tool struct {
 	description string
 	inputSchema map[string]any
 	handler     func(ctx context.Context, args map[string]any) (string, error)
+	// mutating marks a tool that changes state (currently only start_pcap);
+	// everything else only reads from the hub. Surfaced as
+	// annotations.readOnlyHint so MCP clients can auto-approve read-only
+	// calls without a confirmation prompt.
+	mutating bool
 }
 
 // New builds an MCP server that talks to the hub at hubURL, authenticating
@@ -83,9 +99,17 @@ type rpcError struct {
 
 // toolDef is the shape advertised by tools/list.
 type toolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	InputSchema map[string]any   `json:"inputSchema"`
+	Annotations *toolAnnotations `json:"annotations,omitempty"`
+}
+
+// toolAnnotations carries MCP's tool behavior hints (2025-03-26 revision;
+// harmless extra fields for a 2024-11-05 client, which ignores what it
+// doesn't recognize).
+type toolAnnotations struct {
+	ReadOnlyHint bool `json:"readOnlyHint"`
 }
 
 // ServeStdio runs the JSON-RPC loop, reading one request per line from stdin
@@ -166,6 +190,7 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) rpcResponse {
 			"protocolVersion": protocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": config.Name, "version": config.Ver()},
+			"instructions":    serverInstructions,
 		})
 	case "ping":
 		return s.ok(req.ID, map[string]any{})
@@ -203,7 +228,27 @@ func (s *Server) callTool(ctx context.Context, req rpcRequest) rpcResponse {
 		s.log.Warn("tool failed", "tool", p.Name, "err", err)
 		return s.ok(req.ID, toolError(err.Error()))
 	}
-	return s.ok(req.ID, toolResult(text, false))
+	return s.ok(req.ID, toolResult(capText(text), false))
+}
+
+// maxToolTextBytes bounds every tool's returned text so a large query (many
+// entries via list_entries, or a get_entry whose captured body/headers are
+// big) can't blow past the calling agent's context window.
+const maxToolTextBytes = 100_000
+
+// capText truncates s to at most maxToolTextBytes (at a valid UTF-8
+// boundary), appending an explicit notice — never a silent, misleadingly
+// "complete-looking" cut — that also says how to get a smaller result.
+func capText(s string) string {
+	if len(s) <= maxToolTextBytes {
+		return s
+	}
+	cut := s[:maxToolTextBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return fmt.Sprintf("%s\n\n... [truncated: %d of %d bytes shown — narrow with a more specific filter, "+
+		"a smaller limit, or page with before_seq]", cut, len(cut), len(s))
 }
 
 func (s *Server) lookup(name string) *tool {
@@ -218,7 +263,12 @@ func (s *Server) lookup(name string) *tool {
 func (s *Server) toolDefs() []toolDef {
 	defs := make([]toolDef, 0, len(s.tools))
 	for _, t := range s.tools {
-		defs = append(defs, toolDef{Name: t.name, Description: t.description, InputSchema: t.inputSchema})
+		defs = append(defs, toolDef{
+			Name:        t.name,
+			Description: t.description,
+			InputSchema: t.inputSchema,
+			Annotations: &toolAnnotations{ReadOnlyHint: !t.mutating},
+		})
 	}
 	return defs
 }
@@ -281,7 +331,9 @@ func (s *Server) registerTools() {
 		{
 			name: "list_entries",
 			description: "List recent captured L7 entries (newest first) as compact records " +
-				"(id, protocol, time, src, dst, summary, response, status, latency). Narrow with an IFL filter and/or a time range.",
+				"(id, seq, protocol, time, src, dst, summary, response, status, latency). Narrow with an IFL filter " +
+				"and/or a time range. When the result is a full page, it ends with a before_seq hint for the next " +
+				"page — pass that back to keep paging older.",
 			inputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -292,6 +344,11 @@ func (s *Server) registerTools() {
 					},
 					"since": sinceProp,
 					"until": untilProp,
+					"before_seq": map[string]any{
+						"type": "number",
+						"description": "Pagination cursor: only entries older than this seq value (from a " +
+							"previous call's \"seq\" field or its next-page hint), for paging back past `limit`.",
+					},
 				},
 			},
 			handler: s.handleListEntries,
@@ -438,7 +495,8 @@ func (s *Server) registerTools() {
 					"durationSeconds": map[string]any{"type": "number", "description": "Capture duration in seconds (optional)."},
 				},
 			},
-			handler: s.handleStartPcap,
+			handler:  s.handleStartPcap,
+			mutating: true,
 		})
 	}
 }
@@ -467,6 +525,9 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 	}
 	setTimeArgs(q, args)
 	q.Set("limit", strconv.Itoa(limit))
+	if bs := argInt(args, "before_seq", 0); bs > 0 {
+		q.Set("before_seq", strconv.Itoa(bs))
+	}
 
 	var entries []api.Entry
 	if err := s.getJSON(ctx, "/api/entries?"+q.Encode(), &entries); err != nil {
@@ -476,6 +537,7 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 	for _, e := range entries {
 		rec := map[string]any{
 			"id":         e.ID,
+			"seq":        e.Seq,
 			"protocol":   e.Protocol,
 			"time":       e.Timestamp,
 			"src":        endpointLabel(e.Source),
@@ -497,7 +559,14 @@ func (s *Server) handleListEntries(ctx context.Context, args map[string]any) (st
 	if err != nil {
 		return "", fmt.Errorf("marshaling entries: %w", err)
 	}
-	return fmt.Sprintf("%d entries\n%s", len(compact), b), nil
+	out := fmt.Sprintf("%d entries\n%s", len(compact), b)
+	// A full page (len == limit) may not be the whole story — the buffer
+	// could hold plenty more older entries. Hint the cursor explicitly
+	// rather than letting the agent assume this is everything.
+	if len(entries) == limit {
+		out += fmt.Sprintf("\n\nnext page: call again with before_seq=%d to see older entries", entries[len(entries)-1].Seq)
+	}
+	return out, nil
 }
 
 // setTimeArgs copies the optional since/until tool args onto a hub query.
