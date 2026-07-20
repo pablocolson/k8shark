@@ -287,11 +287,40 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   `TestAMQPOversizedBodyFrame` ; `gofmt`/`go vet`/`go build`/`go test -race
   ./...` (231 tests) propres.
 
+**Backlog, lot 5 — SEC-5, séparation des rôles du token :**
+
+- **SEC-5** : trois classes de token routées par `acceptedTokens`
+  (server.go) — `workerToken` seul ouvre `/ws/worker` quand il est défini
+  (un token de lecture ne peut plus injecter d'entrées forgées, un
+  credential worker compromis ne peut pas lire le trafic), `adminToken`
+  seul ouvre les appels API mutants (POST /api/workers/capture — le nginx
+  du front n'injectant que `apiToken`, les utilisateurs du dashboard
+  perdent le contrôle pause/reprise dès qu'un token admin existe) et donne
+  aussi la lecture ; chaque classe non définie retombe sur `apiToken`
+  (configuration mono-token strictement inchangée, `apiToken` vide = API
+  ouverte). Extraction du credential factorisée dans `presentedToken`
+  (Bearer > sous-protocole WS > `?token=`). CLI : `--worker-token` /
+  `--admin-token` (+ `$K8SHARK_WORKER_TOKEN` / `$K8SHARK_ADMIN_TOKEN`).
+  Chart : `hub.workerToken` / `hub.adminToken` dans le Secret existant
+  (clés `worker-token`/`admin-token`), le DaemonSet worker bascule
+  automatiquement sur la clé worker-token quand elle existe, le hub reçoit
+  les trois env.
+
+  Vérifié en conditions réelles (hub 3 tokens + worker démo réel, sondes
+  curl) au 2026-07-20 : worker connecté avec le worker token, GET entries
+  avec worker token → 401, POST capture avec read token → 401 / admin
+  token → 200, GET stats avec admin token → 200, `/ws/worker` avec read
+  token → 401. `helm lint` + `helm template` propres (Secret 3 clés, env
+  worker/hub corrects, aucun Secret rendu sans token). Tests :
+  `TestWorkerTokenSeparation`, `TestAdminTokenSeparation`,
+  `TestSingleTokenFallback`, `TestWorkerTokenOnlyKeepsReadsOpen`
+  (auth_test.go) ; `go test -race ./...` (235 tests) propre.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-5/7, TST-5/8,
+UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-7, TST-5/8,
 EXT-2/3/4/5.
-Prochain chantier logique : d'autres items S/M de ce backlog (SEC-5 tranche le
-token unique lecture/contrôle/worker, SEC-7 apporte le TLS hub), ou le
+Prochain chantier logique : d'autres items S/M de ce backlog (SEC-7 apporte le
+TLS hub et clôt le thème sécurité ; MCP-6 durcit le protocole JSON-RPC), ou le
 démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

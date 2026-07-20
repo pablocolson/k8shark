@@ -37,6 +37,17 @@ type Options struct {
 	// logs, browser history and Referer headers) on /api/* and the WebSocket
 	// endpoints. Empty keeps the API open (local dev, trusted clusters).
 	APIToken string
+	// WorkerToken, when non-empty, is required on /ws/worker instead of
+	// APIToken — so a leaked read token can't inject forged entries into the
+	// dashboard, and a worker credential can't read captured traffic. Empty
+	// falls back to APIToken (single-token setups keep working).
+	WorkerToken string
+	// AdminToken, when non-empty, is required on mutating /api calls (e.g.
+	// POST /api/workers/capture, which pauses capture cluster-wide) instead
+	// of APIToken; it also grants read access. The front's nginx proxy only
+	// injects APIToken, so setting this withholds control from dashboard
+	// users. Empty falls back to APIToken.
+	AdminToken string
 	// BufferSize overrides the in-memory entry ring size (0 = default).
 	BufferSize int
 	// AllowedOrigins lists extra browser Origins granted API/WebSocket access
@@ -51,6 +62,8 @@ type Server struct {
 	log          *slog.Logger
 	upgrader     websocket.Upgrader
 	apiToken     string
+	workerToken  string
+	adminToken   string
 	allowOrigins []string
 
 	mu           sync.RWMutex
@@ -99,6 +112,8 @@ func New(log *slog.Logger, opts Options) *Server {
 		store:        newStore(size),
 		log:          log,
 		apiToken:     opts.APIToken,
+		workerToken:  opts.WorkerToken,
+		adminToken:   opts.AdminToken,
 		allowOrigins: opts.AllowedOrigins,
 		frontClients: map[*frontClient]struct{}{},
 		workers:      map[string]*workerInfo{},
@@ -1066,36 +1081,86 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// withAuth enforces the optional API token on /api/* and the WebSocket
+// withAuth enforces the optional tokens on /api/* and the WebSocket
 // endpoints. Static UI assets, /healthz and /metrics stay open (the data is
 // behind /api; metrics scraping is cluster-internal). Browsers cannot set
 // headers on a WebSocket, so a `Sec-WebSocket-Protocol: bearer.<token>`
 // subprotocol is accepted, as is a ?token= query param (deprecated: a token in
 // the URL leaks into access logs, history and Referer headers).
+//
+// Three token classes route by path/method (see acceptedTokens): the worker
+// channel, mutations, and reads. Each optional class falls back to APIToken
+// when unset, so a single-token setup behaves exactly as before.
 func (s *Server) withAuth(h http.Handler) http.Handler {
-	if s.apiToken == "" {
+	if s.apiToken == "" && s.workerToken == "" && s.adminToken == "" {
 		return h
 	}
-	want := []byte(s.apiToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if !strings.HasPrefix(p, "/api/") && p != "/api" && p != "/ws" && !strings.HasPrefix(p, "/ws/") {
 			h.ServeHTTP(w, r)
 			return
 		}
-		got := r.URL.Query().Get("token")
-		if tok := strings.TrimPrefix(wsBearerProtocol(r), wsBearerPrefix); tok != "" {
-			got = tok
-		}
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			got = strings.TrimPrefix(auth, "Bearer ")
-		}
-		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		accepted := s.acceptedTokens(p, r.Method)
+		if len(accepted) == 0 {
+			h.ServeHTTP(w, r)
 			return
 		}
-		h.ServeHTTP(w, r)
+		got := []byte(presentedToken(r))
+		for _, want := range accepted {
+			if subtle.ConstantTimeCompare(got, []byte(want)) == 1 {
+				h.ServeHTTP(w, r)
+				return
+			}
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// acceptedTokens returns the token values granting access to this request, or
+// nil for open access. Classes:
+//   - /ws/worker (entry injection): the worker token alone when set — a read
+//     token must not let anyone forge entries, and a compromised worker
+//     credential must not read captured traffic.
+//   - mutating /api calls (non-GET/HEAD, e.g. POST /api/workers/capture): the
+//     admin token alone when set — the front proxy only injects the API token,
+//     so dashboard users lose cluster-wide control once an admin token exists.
+//   - reads (/api GETs, the front /ws): the API token, plus the admin token
+//     (an admin can read; a worker cannot). No API token = reads stay open.
+func (s *Server) acceptedTokens(path, method string) []string {
+	switch {
+	case path == "/ws/worker" || strings.HasPrefix(path, "/ws/worker/"):
+		if s.workerToken != "" {
+			return []string{s.workerToken}
+		}
+	case method != http.MethodGet && method != http.MethodHead && strings.HasPrefix(path, "/api"):
+		if s.adminToken != "" {
+			return []string{s.adminToken}
+		}
+	default:
+		if s.apiToken == "" {
+			return nil
+		}
+		if s.adminToken != "" {
+			return []string{s.apiToken, s.adminToken}
+		}
+	}
+	if s.apiToken == "" {
+		return nil
+	}
+	return []string{s.apiToken}
+}
+
+// presentedToken extracts the client's credential: `Authorization: Bearer`
+// wins, then the `bearer.<token>` WS subprotocol, then ?token= (deprecated).
+func presentedToken(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	if proto := wsBearerProtocol(r); proto != "" {
+		return strings.TrimPrefix(proto, wsBearerPrefix)
+	}
+	return r.URL.Query().Get("token")
 }
 
 // wsBearerPrefix marks the WebSocket subprotocol entry that carries the API

@@ -38,7 +38,7 @@ subjects:
     name: k8shark-hub
     namespace: {{ .Release.Namespace }}
 ---
-{{- if .Values.hub.apiToken }}
+{{- if or .Values.hub.apiToken .Values.hub.workerToken .Values.hub.adminToken }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -47,7 +47,15 @@ metadata:
   labels:
     {{- include "k8shark.labels" . | nindent 4 }}
 stringData:
-  token: {{ .Values.hub.apiToken | quote }}
+  {{- with .Values.hub.apiToken }}
+  token: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.hub.workerToken }}
+  worker-token: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.hub.adminToken }}
+  admin-token: {{ . | quote }}
+  {{- end }}
 ---
 {{- end }}
 {{- if gt (int .Values.hub.replicas) 1 }}
@@ -98,13 +106,29 @@ spec:
             {{- if .Values.hub.bufferSize }}
             - --buffer={{ .Values.hub.bufferSize }}
             {{- end }}
-          {{- if .Values.hub.apiToken }}
+          {{- if or .Values.hub.apiToken .Values.hub.workerToken .Values.hub.adminToken }}
           env:
+            {{- if .Values.hub.apiToken }}
             - name: K8SHARK_API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: k8shark-api-token
                   key: token
+            {{- end }}
+            {{- if .Values.hub.workerToken }}
+            - name: K8SHARK_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: worker-token
+            {{- end }}
+            {{- if .Values.hub.adminToken }}
+            - name: K8SHARK_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: admin-token
+            {{- end }}
           {{- end }}
           ports:
             - name: hub

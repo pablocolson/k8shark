@@ -45,6 +45,19 @@ hub:
   # given --no-auth or an explicit `--set hub.apiToken=...`; installing
   # straight from this chart (helm install, not tap) still defaults to open.
   apiToken: ""
+  # workerToken: when set, /ws/worker (the entry-ingest channel) requires this
+  # distinct token instead of apiToken — a leaked read token can then no
+  # longer inject forged entries, and a compromised worker credential cannot
+  # read captured traffic. The worker DaemonSet picks it up automatically.
+  # Empty falls back to apiToken (single-token behavior).
+  workerToken: ""
+  # adminToken: when set, mutating API calls (POST /api/workers/capture —
+  # pausing capture cluster-wide) require this distinct token; it also grants
+  # reads. The front's nginx proxy only injects apiToken, so dashboard users
+  # lose the pause/resume controls once this is set — pass the admin token by
+  # hand (port-forward + Authorization header) when you need them.
+  # Empty falls back to apiToken (single-token behavior).
+  adminToken: ""
   resources:
     requests:
       cpu: 100m

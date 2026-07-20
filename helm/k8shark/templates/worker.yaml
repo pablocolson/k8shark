@@ -78,7 +78,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            {{- if .Values.hub.apiToken }}
+            {{- if .Values.hub.workerToken }}
+            # The worker authenticates with the dedicated worker token when
+            # one is set (the worker CLI reads $K8SHARK_API_TOKEN for its hub
+            # connection regardless of which secret key feeds it).
+            - name: K8SHARK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: k8shark-api-token
+                  key: worker-token
+            {{- else if .Values.hub.apiToken }}
             - name: K8SHARK_API_TOKEN
               valueFrom:
                 secretKeyRef:
