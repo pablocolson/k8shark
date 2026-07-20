@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,17 @@ import (
 
 	"github.com/pablocolson/k8shark/pkg/api"
 )
+
+// newTestResolver builds an enabled (non-nil client) resolver with a seeded IP
+// map and an empty catch-up registry, for the catch-up tests below.
+func newTestResolver(byIP map[string]ref) *resolver {
+	return &resolver{
+		log:     slog.Default(),
+		client:  &http.Client{}, // non-nil => enabled()
+		byIP:    byIP,
+		pending: map[string]*pendingResolve{},
+	}
+}
 
 // TestResolverEnrich fills endpoint Name/Namespace from the IP map, skips
 // unknown IPs, and never overwrites an already-set Name.
@@ -100,6 +112,155 @@ func TestResolverRefreshFailureCounted(t *testing.T) {
 	}
 	if r.byIP["10.0.0.1"].name != "keep" {
 		t.Error("a failed refresh must not blank the previous enrichment map")
+	}
+}
+
+// TestResolverEnrichTracksOnlyUnresolved: enrich registers an entry for
+// catch-up only while it still carries a bare endpoint IP; a fully resolved
+// entry is not tracked.
+func TestResolverEnrichTracksOnlyUnresolved(t *testing.T) {
+	r := newTestResolver(map[string]ref{"10.0.0.1": {name: "web", namespace: "shop"}})
+
+	// Both endpoints resolvable at ingest -> nothing to catch up.
+	r.enrich(&api.Entry{ID: "a", Source: api.Endpoint{IP: "10.0.0.1"}, Destination: api.Endpoint{IP: "10.0.0.1"}})
+	if len(r.pending) != 0 {
+		t.Fatalf("resolved entry tracked: pending = %d, want 0", len(r.pending))
+	}
+
+	// Bare source IP the resolver doesn't know yet -> tracked for catch-up.
+	r.enrich(&api.Entry{ID: "b", Source: api.Endpoint{IP: "10.9.9.9"}})
+	if _, ok := r.pending["b"]; !ok {
+		t.Fatal("unresolved entry not tracked for catch-up")
+	}
+}
+
+// TestResolverCatchUp is the core HUB-6 path: an entry ingested before its pod
+// was known keeps a bare IP, then the next refresh's catch-up re-resolves it
+// once the resolver learns the mapping — delivering a corrected *copy* through
+// onResolved and leaving the store-shared original untouched.
+func TestResolverCatchUp(t *testing.T) {
+	r := newTestResolver(map[string]ref{
+		"10.0.0.2": {name: "pg-0", namespace: "db", workload: "pg"},
+	})
+	var corrected []*api.Entry
+	r.onResolved = func(e *api.Entry) { corrected = append(corrected, e) }
+
+	// Ingested before the source pod (10.0.0.5) exists: dst resolves, src bare.
+	e := &api.Entry{
+		ID:          "e1",
+		Source:      api.Endpoint{IP: "10.0.0.5", Port: 5000},
+		Destination: api.Endpoint{IP: "10.0.0.2", Port: 5432},
+	}
+	r.enrich(e)
+	if e.Source.Name != "" {
+		t.Fatalf("source resolved too early: %q", e.Source.Name)
+	}
+	if e.Destination.Name != "pg-0" {
+		t.Fatalf("dest = %q, want pg-0", e.Destination.Name)
+	}
+	if got := len(r.pending); got != 1 {
+		t.Fatalf("pending = %d, want 1 (source still bare)", got)
+	}
+
+	// The source pod appears; the next refresh's catch-up must resolve it.
+	r.byIP["10.0.0.5"] = ref{name: "cart-xyz", namespace: "shop", workload: "cart"}
+	if n := r.retryPending(); n != 1 {
+		t.Fatalf("retryPending resolved %d, want 1", n)
+	}
+	if r.lateResolved() != 1 {
+		t.Fatalf("lateResolved() = %d, want 1", r.lateResolved())
+	}
+	if len(r.pending) != 0 {
+		t.Fatalf("pending = %d after catch-up, want 0 (fully resolved)", len(r.pending))
+	}
+
+	// Shared-pointer safety: the stored/original entry must NOT be mutated —
+	// the correction is applied to a copy the store's readers never touch.
+	if e.Source.Name != "" {
+		t.Errorf("catch-up mutated the shared entry in place (source=%q); must correct a copy", e.Source.Name)
+	}
+	if len(corrected) != 1 {
+		t.Fatalf("onResolved fired %d times, want 1", len(corrected))
+	}
+	c := corrected[0]
+	if c == e {
+		t.Error("onResolved received the shared entry pointer, want a copy")
+	}
+	if c.Source.Name != "cart-xyz" || c.Source.Namespace != "shop" || c.Source.Workload != "cart" {
+		t.Errorf("corrected source = %q/%q/%q, want cart-xyz/shop/cart",
+			c.Source.Name, c.Source.Namespace, c.Source.Workload)
+	}
+	if c.Destination.Name != "pg-0" {
+		t.Errorf("corrected dest = %q, want pg-0 (carried from ingest)", c.Destination.Name)
+	}
+}
+
+// TestResolverCatchUpNilSeam: with no onResolved seam wired (the default),
+// catch-up still performs its bookkeeping — detecting the resolution, counting
+// it, and clearing the entry from the registry — without mutating the shared
+// entry.
+func TestResolverCatchUpNilSeam(t *testing.T) {
+	r := newTestResolver(map[string]ref{})
+	e := &api.Entry{ID: "e1", Source: api.Endpoint{IP: "10.0.0.7"}}
+	r.enrich(e)
+	if len(r.pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(r.pending))
+	}
+	r.byIP["10.0.0.7"] = ref{name: "api-1", namespace: "shop", workload: "api"}
+	if n := r.retryPending(); n != 1 {
+		t.Fatalf("retryPending resolved %d, want 1", n)
+	}
+	if len(r.pending) != 0 || r.lateResolved() != 1 {
+		t.Fatalf("bookkeeping off: pending=%d lateResolved=%d", len(r.pending), r.lateResolved())
+	}
+	if e.Source.Name != "" {
+		t.Errorf("shared entry mutated with nil seam: source=%q", e.Source.Name)
+	}
+}
+
+// TestResolverCatchUpAgesOut: an entry whose IP never becomes known (an external
+// address) is dropped from the registry after maxResolveAttempts cycles and
+// never reported as resolved.
+func TestResolverCatchUpAgesOut(t *testing.T) {
+	r := newTestResolver(map[string]ref{}) // nothing ever resolves
+	fired := 0
+	r.onResolved = func(*api.Entry) { fired++ }
+
+	r.enrich(&api.Entry{ID: "ext", Source: api.Endpoint{IP: "8.8.8.8"}})
+	if len(r.pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(r.pending))
+	}
+	for i := 0; i < maxResolveAttempts-1; i++ {
+		r.retryPending()
+		if len(r.pending) != 1 {
+			t.Fatalf("dropped too early after %d attempts", i+1)
+		}
+	}
+	r.retryPending() // maxResolveAttempts-th cycle without progress: aged out
+	if len(r.pending) != 0 {
+		t.Fatalf("pending = %d, want 0 after %d attempts", len(r.pending), maxResolveAttempts)
+	}
+	if fired != 0 || r.lateResolved() != 0 {
+		t.Errorf("unresolvable IP reported resolved (fired=%d, lateResolved=%d)", fired, r.lateResolved())
+	}
+}
+
+// TestResolverPendingCap: the catch-up registry is bounded — entries past
+// maxPendingResolve are dropped rather than growing it without limit.
+func TestResolverPendingCap(t *testing.T) {
+	r := &resolver{pending: map[string]*pendingResolve{}}
+	for i := 0; i < maxPendingResolve; i++ {
+		r.trackPending(&api.Entry{ID: fmt.Sprintf("e%d", i), Source: api.Endpoint{IP: "10.1.2.3"}})
+	}
+	if len(r.pending) != maxPendingResolve {
+		t.Fatalf("pending = %d, want %d", len(r.pending), maxPendingResolve)
+	}
+	r.trackPending(&api.Entry{ID: "overflow", Source: api.Endpoint{IP: "10.1.2.3"}})
+	if len(r.pending) != maxPendingResolve {
+		t.Fatalf("cap breached: pending = %d, want %d", len(r.pending), maxPendingResolve)
+	}
+	if _, ok := r.pending["overflow"]; ok {
+		t.Error("entry added past the registry cap")
 	}
 }
 

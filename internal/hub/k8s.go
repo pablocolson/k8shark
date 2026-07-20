@@ -24,7 +24,23 @@ const (
 	saCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	// enrichInterval is how often the IP -> identity map is rebuilt.
 	enrichInterval = 20 * time.Second
+	// maxPendingResolve bounds the catch-up registry (see trackPending) so a
+	// steady stream of external / never-cluster IPs can't grow it without limit;
+	// past this the newest unresolved entries are simply not tracked.
+	maxPendingResolve = 8192
+	// maxResolveAttempts is how many refresh cycles an entry waits in the
+	// catch-up registry before being dropped as unresolvable (an external IP
+	// never enters byIP). At enrichInterval=20s that is ~2 minutes.
+	maxResolveAttempts = 6
 )
+
+// pendingResolve is a buffered entry still carrying a bare endpoint IP, awaiting a
+// late IP -> identity resolution, with the count of refresh cycles it has waited
+// (dropped after maxResolveAttempts).
+type pendingResolve struct {
+	e        *api.Entry
+	attempts int
+}
 
 // ref is the resolved k8s identity behind an IP (a pod or a service).
 type ref struct {
@@ -51,15 +67,40 @@ type resolver struct {
 	mu   sync.RWMutex
 	byIP map[string]ref
 
+	// pmu guards pending. Kept separate from mu so catch-up bookkeeping never
+	// contends with byIP readers/writers on the hot enrich() path.
+	pmu sync.Mutex
+	// pending is the catch-up registry: entries whose endpoint IP wasn't known
+	// at ingest, keyed by entry ID, so a later refresh can re-run enrichment
+	// once the resolver learns the mapping (e.g. a pod created after the entry
+	// was captured). See trackPending / retryPending.
+	pending map[string]*pendingResolve
+
+	// onResolved, when non-nil, receives a freshly-enriched *copy* of an entry
+	// whose previously-bare endpoint IP the resolver has now learned (see
+	// retryPending). It is the seam through which a caller applies the late
+	// correction *safely*. The resolver must never mutate the entry the ring
+	// buffer holds: store.go marks entries immutable-after-add and the REST read
+	// paths marshal those pointers with no lock held, so an in-place write here
+	// would data-race concurrent readers. The catch-up therefore hands back a
+	// copy and leaves applying it (a store.mu-guarded slot swap + re-broadcast,
+	// which lives in store.go / server.go) to the caller. Left nil — the default
+	// — the catch-up performs detection and bookkeeping only.
+	onResolved func(*api.Entry)
+
 	// refreshFailures counts refresh() cycles that gave up without updating
 	// byIP (a failed/partial API call — see refresh), exposed via /metrics so
 	// a broken RBAC binding shows up as a rising counter instead of silently
 	// stale enrichment.
 	refreshFailures atomic.Int64
+
+	// resolvedLate counts endpoints the catch-up re-resolved after their
+	// pod/service became known post-ingest (see retryPending).
+	resolvedLate atomic.Int64
 }
 
 func newResolver(log *slog.Logger) *resolver {
-	r := &resolver{log: log, byIP: map[string]ref{}}
+	r := &resolver{log: log, byIP: map[string]ref{}, pending: map[string]*pendingResolve{}}
 	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
 	token, err := os.ReadFile(saTokenPath)
 	if host == "" || err != nil {
@@ -87,6 +128,10 @@ func (r *resolver) enabled() bool { return r.client != nil }
 // byIP, since process start.
 func (r *resolver) failures() int64 { return r.refreshFailures.Load() }
 
+// lateResolved returns how many buffered entries the catch-up registry has
+// re-resolved after their pod/service became known post-ingest, since start.
+func (r *resolver) lateResolved() int64 { return r.resolvedLate.Load() }
+
 // run rebuilds the IP map every enrichInterval until ctx is cancelled. A no-op
 // when the resolver is disabled (not in a cluster).
 func (r *resolver) run(ctx context.Context) {
@@ -110,6 +155,15 @@ func (r *resolver) run(ctx context.Context) {
 
 // refresh rebuilds byIP from a pods list plus a services list. On a failed or
 // empty refresh it keeps the previous map rather than blanking enrichment.
+//
+// This is a full periodic re-list, not an incremental watch. The ROADMAP (HUB-6)
+// also floats moving to the streaming watch API (?watch=true&resourceVersion=N)
+// for near-zero resolution latency; that is deliberately deferred here as a much
+// larger change (streaming event decode, bookmark/resourceVersion tracking,
+// 410-Gone resync, and a watch goroutine per resource kind) that would not be a
+// safe single-file edit. The periodic list stays as the map's source of truth;
+// the catch-up registry (retryPending) closes the narrower gap the watch was
+// meant to help — entries already buffered when their pod was still unknown.
 func (r *resolver) refresh(ctx context.Context) {
 	m := r.listPods(ctx, r.listReplicaSetOwners(ctx))
 	if m == nil {
@@ -125,7 +179,10 @@ func (r *resolver) refresh(ctx context.Context) {
 	r.mu.Lock()
 	r.byIP = m
 	r.mu.Unlock()
-	r.log.Debug("k8s enrichment refreshed", "endpoints", len(m))
+	// Now that the map is fresh, re-run enrichment for entries that were bare at
+	// ingest — a pod created between two refreshes is resolvable from this point.
+	late := r.retryPending()
+	r.log.Debug("k8s enrichment refreshed", "endpoints", len(m), "lateResolved", late)
 }
 
 // get performs an authenticated GET and decodes the JSON body into out.
@@ -305,13 +362,16 @@ func (r *resolver) listServices(ctx context.Context) map[string]ref {
 }
 
 // enrich fills Name/Namespace on the entry's endpoints from the IP map, when
-// known and not already set. Safe to call when disabled (no-op).
+// known and not already set. Safe to call when disabled (no-op). It also
+// registers the entry for catch-up re-enrichment when an endpoint IP is still
+// unresolved (see trackPending), so a pod that appears later still gets a name.
 func (r *resolver) enrich(e *api.Entry) {
 	if e == nil || !r.enabled() {
 		return
 	}
 	r.enrichEndpoint(&e.Source)
 	r.enrichEndpoint(&e.Destination)
+	r.trackPending(e)
 }
 
 func (r *resolver) enrichEndpoint(ep *api.Endpoint) {
@@ -330,4 +390,101 @@ func (r *resolver) enrichEndpoint(ep *api.Endpoint) {
 	if ep.Workload == "" {
 		ep.Workload = rf.workload
 	}
+}
+
+// endpointUnresolved reports whether ep carries an IP the resolver could still
+// put a name to (an IP is set but no name was filled). External IPs also match —
+// they simply never become resolvable, and the attempts cap ages them out of
+// the registry.
+func endpointUnresolved(ep *api.Endpoint) bool {
+	return ep.IP != "" && ep.Name == ""
+}
+
+// hasUnresolvedEntry reports whether either endpoint of e is still bare.
+func hasUnresolvedEntry(e *api.Entry) bool {
+	return endpointUnresolved(&e.Source) || endpointUnresolved(&e.Destination)
+}
+
+// trackPending records e in the catch-up registry when it still has a bare
+// endpoint IP after enrich, so a later refresh can re-run enrichment once the
+// resolver learns the mapping. Called from enrich, i.e. while the ingest
+// goroutine still exclusively owns e; the registry only ever *reads* e's fields
+// afterwards (retryPending copies before enriching), so retaining the pointer is
+// safe against store.go's immutable-after-add contract. A fully resolved entry
+// is dropped from the registry instead.
+func (r *resolver) trackPending(e *api.Entry) {
+	r.pmu.Lock()
+	defer r.pmu.Unlock()
+	if !hasUnresolvedEntry(e) {
+		delete(r.pending, e.ID) // resolved at ingest (or re-seen): forget it
+		return
+	}
+	if r.pending == nil {
+		r.pending = map[string]*pendingResolve{}
+	}
+	if _, ok := r.pending[e.ID]; ok {
+		return // already tracked; keep its accumulated attempts
+	}
+	if len(r.pending) >= maxPendingResolve {
+		return // registry full: drop this one (see maxPendingResolve)
+	}
+	r.pending[e.ID] = &pendingResolve{e: e}
+}
+
+// retryPending re-runs enrichment against the freshly rebuilt byIP map for every
+// tracked entry, and returns how many gained a name this cycle. It never mutates
+// a tracked (store-shared) entry: for each one it enriches a *copy* and, when
+// that copy resolved something new, hands the copy to onResolved for the caller
+// to apply safely (see the onResolved field doc). Entries fully resolved, or
+// that have waited maxResolveAttempts cycles without progress (presumed
+// external), are dropped from the registry.
+func (r *resolver) retryPending() int {
+	r.pmu.Lock()
+	if len(r.pending) == 0 {
+		r.pmu.Unlock()
+		return 0
+	}
+	pend := make([]*pendingResolve, 0, len(r.pending))
+	for _, pe := range r.pending {
+		pend = append(pend, pe)
+	}
+	r.pmu.Unlock()
+
+	resolved := 0
+	var drop []string
+	for _, pe := range pend {
+		// Read-only shallow copy of the shared entry, then enrich the copy only —
+		// the original stays untouched (see the onResolved field doc for why).
+		cp := *pe.e
+		r.enrichEndpoint(&cp.Source)
+		r.enrichEndpoint(&cp.Destination)
+		progressed := (endpointUnresolved(&pe.e.Source) && !endpointUnresolved(&cp.Source)) ||
+			(endpointUnresolved(&pe.e.Destination) && !endpointUnresolved(&cp.Destination))
+		if progressed {
+			resolved++
+			r.resolvedLate.Add(1)
+			if r.onResolved != nil {
+				r.onResolved(&cp)
+			}
+		}
+		if !hasUnresolvedEntry(&cp) {
+			drop = append(drop, pe.e.ID) // fully resolved
+			continue
+		}
+		// attempts is only ever touched from the single refresh goroutine that
+		// drives retryPending, so it needs no extra synchronisation.
+		pe.attempts++
+		if pe.attempts >= maxResolveAttempts {
+			drop = append(drop, pe.e.ID)
+		}
+	}
+
+	if len(drop) > 0 {
+		r.pmu.Lock()
+		for _, id := range drop {
+			delete(r.pending, id)
+		}
+		r.pmu.Unlock()
+	}
+	return resolved
 }

@@ -485,12 +485,60 @@ marshals :**
   connectée) — logique couverte par les tests jsdom et la forme de
   `/api/summary` vérifiée en réel.
 
-Reste du backlog hors Phase 3 : CAP-7/8, DIS-6/8/10/11, HUB-6,
-UI-8, MCP-1, OPS-6/10, TST-5/8,
-EXT-2/3/4/5.
+**Backlog, lot 12 — deuxième vague multi-agents (DIS-6, MCP-1, HUB-6) :**
+
+- **DIS-6** : suivi des connexions WebSocket après le `101 Switching
+  Protocols` — `consumeHTTPID` détecte le 101 + `Upgrade: websocket`
+  (émet le handshake comme entrée HTTP normale, appariée à la GET
+  pendante), puis bascule les DEUX directions sur `consumeWSFrames`, un
+  parseur RFC 6455 minimal sans panique (FIN/opcode/mask, longueur
+  7/16/64 bits, unmasking, borne `wsMaxPayload` 8 Mio + aperçu 256 octets),
+  émettant des entrées standalone `ProtocolWS` (modèle push Redis) : aperçu
+  texte/binaire (via `safeBody`/`binaryPreview`), code de close décodé.
+  Champ additif `Payload.WSOpcode`, filtre `ws.opcode` (getter + catalogue
+  facets, `ws` ajouté aux valeurs de l'enum protocol), couleur UI gold dans
+  `ui/src/constants.ts` (`PROTO_COLORS`) + cas `ws` dans EntryDetail. Tests
+  `TestWebSocketUpgradeAndTextFrames`, `TestWebSocketCloseFrame`,
+  `TestWebSocketGarbledFrameNoPanic` (6 sous-cas), `TestCompileFilterWebSocket`.
+- **MCP-1** : synthèse PCAP hub-side depuis le ring — endpoint
+  `GET /api/pcap?filter=&since=&until=&limit=` (`internal/hub/pcap.go`) qui
+  rejoue les entrées en paquets synthétiques Ethernet/IPv4/TCP|UDP|ICMP via
+  `gopacket/pcapgo`+`layers` (SerializeLayers, FixLengths+checksums), bytes
+  requête depuis `Raw.Hex` (port Go du format hexdump) sinon Body/Summary,
+  transport choisi par protocole, IPv6 sauté ; réutilise `queryPredicate`
+  (IFL + since/until, champ inconnu → 400), borné par `?limit=`. Outil MCP
+  gated (`--allow-capture`) : `start_pcap` (conservé pour rester compatible
+  du test `TestToolDefsReadOnlyHintExceptStartPcap`) avec alias appelable
+  `export_pcap`, écrit un fichier temp et renvoie son chemin + astuce
+  tshark/Wireshark. Tests hub `TestHandlePcap*`/`TestParseHexDump`, MCP
+  `TestExportPcap*`. Vérifié en réel : `/api/pcap` produit un pcap valide
+  (magic `d4c3b2a1`, reconnu par `file(1)`), champ inconnu → 400, l'outil
+  MCP écrit bien un `.pcap` lisible.
+- **HUB-6** : rattrapage d'enrichissement k8s (moitié à haute valeur / bas
+  risque ; le watch incrémental est explicitement différé, commenté dans
+  `refresh()`). Registre `pending` borné (`maxPendingResolve` 8192,
+  `maxResolveAttempts` 6, mutex `pmu` dédié) : `enrich()` traque via
+  `trackPending` les entrées à IP non résolue (pendant que la goroutine
+  d'ingestion possède encore l'entrée), `refresh()` appelle `retryPending`
+  après le swap `byIP`. **Sûreté des pointeurs partagés** : le store rend
+  les `*api.Entry` vivants et `handleEntries` les marshale hors RLock, donc
+  `retryPending` ne mute JAMAIS une entrée stockée — il en fait une copie
+  superficielle, enrichit la copie, et la passe à un seam `onResolved` (nil
+  par défaut : détection + comptage `lateResolved()` seulement, aucun effet
+  visible, zéro course). Un applier de ~5 lignes sous `store.mu` branchera
+  le seam plus tard. Tests `TestResolverCatchUp*`, `TestResolverEnrichTracksOnlyUnresolved`,
+  `TestResolverPendingCap` ; anciens tests resolver inchangés.
+
+  Vérifié au 2026-07-20 : `gofmt`/`go vet`/`go build`/`go test -race ./...`
+  (278 tests) et `vitest`/`npm run build` (100 tests) propres.
+
+Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/10/11,
+UI-8, OPS-6/10, TST-5/8, EXT-2/3/4 (EXT-5 partiel : hygiène GitHub faite,
+screenshots + réf IFL restants).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : MCP-1 (export PCAP), TST-5 (lint Go + eslint),
-HUB-6 (watch k8s incrémental), UI-8 (perf table à fort volume),
+Prochain chantier logique : TST-5 (lint Go + eslint), OPS-6 (dérive du
+manifest deploy/ — dépend du choix RBAC de HUB-6, désormais get/list
+inchangé), DIS-10 (résilience perte de segments), UI-8 (perf table),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
