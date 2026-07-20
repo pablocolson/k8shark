@@ -61,6 +61,7 @@ func (s *store) add(e *api.Entry) {
 	}
 
 	s.total++
+	e.Seq = s.total
 	s.byProtocol[string(e.Protocol)]++
 	if e.Status != "" {
 		s.byStatus[e.Status]++
@@ -138,6 +139,35 @@ func (s *store) recentBefore(beforeID string, limit int, match func(*api.Entry) 
 			if e.ID == beforeID {
 				skipping = false
 			}
+			continue
+		}
+		if match == nil || match(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// recentBeforeSeq returns up to limit entries with Seq strictly less than
+// beforeSeq, newest first, satisfying match. Unlike recentBefore (anchored on
+// an entry ID that must still be present in the ring to find the starting
+// point), this needs no such lookup: Seq is a hub-assigned monotonic counter
+// (see add), so "older than this point" is a plain comparison that keeps
+// working even once the entry a client is paging from has aged out of the
+// buffer.
+func (s *store) recentBeforeSeq(beforeSeq int64, limit int, match func(*api.Entry) bool) []*api.Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*api.Entry, 0, limit)
+	n := s.capacity
+	if !s.full {
+		n = s.next
+	}
+	for i := 0; i < n && len(out) < limit; i++ {
+		idx := (s.next - 1 - i + s.capacity) % s.capacity
+		e := s.buf[idx]
+		if e == nil || e.Seq >= beforeSeq {
 			continue
 		}
 		if match == nil || match(e) {

@@ -638,6 +638,20 @@ func (s *Server) handleEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// before_seq is the robust pagination anchor (see recentBeforeSeq): unlike
+	// before (an entry ID that must still be present in the ring to locate
+	// the starting point), it keeps working once the anchoring entry itself
+	// has aged out, since it's a plain numeric comparison. Preferred over
+	// before when both are given.
+	if beforeSeq := r.URL.Query().Get("before_seq"); beforeSeq != "" {
+		n, err := strconv.ParseInt(beforeSeq, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid before_seq: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, s.store.recentBeforeSeq(n, limit, pred))
+		return
+	}
 	if before := r.URL.Query().Get("before"); before != "" {
 		writeJSON(w, s.store.recentBefore(before, limit, pred))
 		return

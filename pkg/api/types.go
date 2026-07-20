@@ -221,6 +221,11 @@ type Entry struct {
 	// L4 is connection-level L2/L3/L4 metadata for TCP/UDP entries (nil for
 	// entries captured mid-connection or without header context).
 	L4 *L4Info `json:"l4,omitempty"`
+	// Seq is a hub-assigned monotonic sequence number (see store.add),
+	// usable as a pagination anchor that survives the anchored entry itself
+	// aging out of the ring buffer (unlike an ID-based anchor). Zero on
+	// entries from a hub that predates this field.
+	Seq int64 `json:"seq,omitempty"`
 }
 
 // --- Wire messages ---------------------------------------------------------

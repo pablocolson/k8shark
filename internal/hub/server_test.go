@@ -78,6 +78,31 @@ func TestHandleEntriesTimeRange(t *testing.T) {
 	}
 }
 
+// ?before_seq= pages strictly-older entries by the numeric Seq the store
+// assigns on ingest (HUB-3), and rejects a non-numeric value with 400.
+func TestHandleEntriesBeforeSeq(t *testing.T) {
+	s := New(slog.Default(), Options{})
+	s.store.add(&api.Entry{ID: "a", Protocol: api.ProtocolHTTP})
+	s.store.add(&api.Entry{ID: "b", Protocol: api.ProtocolHTTP})
+	s.store.add(&api.Entry{ID: "c", Protocol: api.ProtocolHTTP})
+
+	rec := httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?before_seq=2", nil))
+	var got []api.Entry
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding entries: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("before_seq=2 = %+v, want just [a]", got)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleEntries(rec, httptest.NewRequest(http.MethodGet, "/api/entries?before_seq=bogus", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("before_seq=bogus status = %d, want 400", rec.Code)
+	}
+}
+
 // ?sort=&order= returns the top-N entries by numeric field value, and
 // rejects a bad field/order with 400 instead of silently ignoring it.
 func TestHandleEntriesSort(t *testing.T) {

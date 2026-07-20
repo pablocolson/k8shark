@@ -311,11 +311,19 @@ export function useHub(initialFilter: string): HubState {
   // endpoint, anchored on the oldest entry currently shown. Appended results
   // don't get MAX_ENTRIES-trimmed away by the next live flush (capRef is
   // raised to cover them) since the user explicitly asked to see more.
+  //
+  // Anchors on the entry's Seq (before_seq) when present rather than its id
+  // (before): Seq is a plain numeric comparison the hub can apply even once
+  // the anchoring entry itself has aged out of the ring buffer, whereas an
+  // id-based anchor that's no longer present can't be located at all. Falls
+  // back to id for an entry from a hub that predates Seq (seq === 0/absent).
   const loadOlder = useCallback(() => {
     const oldest = entries[entries.length - 1];
     if (!oldest || loadingOlder) return;
     setLoadingOlder(true);
-    const q = new URLSearchParams({ before: oldest.id, limit: "200" });
+    const q = new URLSearchParams(
+      oldest.seq ? { before_seq: String(oldest.seq), limit: "200" } : { before: oldest.id, limit: "200" }
+    );
     if (filterRef.current) q.set("filter", filterRef.current);
     fetch(`/api/entries?${q}`)
       .then((r) => (r.ok ? r.json() : []))

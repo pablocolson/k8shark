@@ -68,6 +68,48 @@ func TestStoreRecentBefore(t *testing.T) {
 	}
 }
 
+// recentBeforeSeq (HUB-3) offers the same "strictly older than" pagination as
+// recentBefore, but by numeric comparison instead of first locating an
+// anchor entry by ID -- so it works even for a seq that isn't (or is no
+// longer) any live entry's, unlike recentBefore which requires the exact
+// anchor ID to still be present in the ring.
+func TestStoreRecentBeforeSeq(t *testing.T) {
+	s := newStore(10)
+	for i := 0; i < 5; i++ {
+		s.add(&api.Entry{ID: fmt.Sprintf("e%d", i), Protocol: api.ProtocolHTTP, Timestamp: time.Now()})
+	}
+	if s.buf[2].Seq != 3 {
+		t.Fatalf("e2.Seq = %d, want 3 (1-indexed ingestion order)", s.buf[2].Seq)
+	}
+
+	// Paging before e2's seq (3) yields e1, e0 -- same result recentBefore("e2", ...) gives.
+	if got := s.recentBeforeSeq(3, 10, nil); len(got) != 2 || got[0].ID != "e1" || got[1].ID != "e0" {
+		t.Fatalf("recentBeforeSeq(3) = %v, want [e1 e0]", ids(got))
+	}
+
+	// A seq beyond any assigned value still works -- no anchor lookup needed,
+	// just a comparison, unlike recentBefore("missing", ...) which must give up.
+	if got := s.recentBeforeSeq(1000, 10, nil); len(got) != 5 {
+		t.Fatalf("recentBeforeSeq(1000) = %v, want all 5 entries", ids(got))
+	}
+
+	// At or below the oldest entry's seq yields nothing.
+	if got := s.recentBeforeSeq(1, 10, nil); len(got) != 0 {
+		t.Fatalf("recentBeforeSeq(1) = %v, want empty", ids(got))
+	}
+
+	// limit is respected.
+	if got := s.recentBeforeSeq(5, 1, nil); len(got) != 1 || got[0].ID != "e3" {
+		t.Fatalf("recentBeforeSeq(5, limit=1) = %v, want [e3]", ids(got))
+	}
+
+	// match filters the paged results too.
+	onlyE0 := func(e *api.Entry) bool { return e.ID == "e0" }
+	if got := s.recentBeforeSeq(3, 10, onlyE0); len(got) != 1 || got[0].ID != "e0" {
+		t.Fatalf("recentBeforeSeq(3, match=e0) = %v, want [e0]", ids(got))
+	}
+}
+
 func ids(es []*api.Entry) []string {
 	out := make([]string, len(es))
 	for i, e := range es {

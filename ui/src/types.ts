@@ -168,6 +168,7 @@ export interface Entry {
   status: "success" | "warning" | "error" | "";
   statusCode: number;
   l4?: L4Info;
+  seq?: number;
 }
 
 export interface Stats {
