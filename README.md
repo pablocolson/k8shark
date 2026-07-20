@@ -42,7 +42,7 @@ A single Go binary provides three roles, selected by sub-command:
   not (src.name contains "canary")
   "checkout"          # bare token = full-text match
   ```
-  Operators: `== != contains > < >= <=`, boolean `and / or / not`, parentheses. Depth- and length-bounded against pathological input.
+  Operators: `== != contains > < >= <=`, plus `matches` (regex), `startswith`, `in (…)`, boolean `and / or / not`, parentheses. Depth- and length-bounded against pathological input. **Full field + operator reference: [docs/ifl.md](docs/ifl.md).**
 - **Entry detail** — method/path/host/status, headers, body snippet, raw hex view, source→destination endpoints with k8s names.
 - **Live service map** — service-to-service graph built from live flows.
 - **Live stats** — total entries, entries/sec, worker count, per-protocol breakdown; click a protocol pill to filter by it.
