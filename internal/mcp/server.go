@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -116,12 +117,30 @@ type toolAnnotations struct {
 // and writing one response per line to stdout, until stdin reaches EOF or ctx
 // is cancelled. It returns nil on a clean shutdown.
 func (s *Server) ServeStdio(ctx context.Context) error {
+	return s.serve(ctx, os.Stdin, os.Stdout)
+}
+
+// serve is ServeStdio over injectable streams (tested with in-memory pipes).
+// Each request is dispatched on its own goroutine, so a slow tools/call (the
+// hub HTTP timeout is 10s) can't block a concurrent ping or another call —
+// JSON-RPC matches responses by id, ordering is not part of the contract — and
+// a mutex serializes writes so concurrent responses can't interleave on the
+// wire.
+func (s *Server) serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.log.Info("mcp server starting", "hub", s.hubURL, "allowCapture", s.allowCapture, "tools", len(s.tools))
 
-	reader := bufio.NewReader(os.Stdin)
-	enc := json.NewEncoder(os.Stdout)
+	reader := bufio.NewReader(in)
+	enc := json.NewEncoder(out)
+	var wmu sync.Mutex
+	write := func(resp rpcResponse) {
+		wmu.Lock()
+		defer wmu.Unlock()
+		if err := enc.Encode(resp); err != nil {
+			s.log.Error("writing response", "err", err)
+		}
+	}
 
-	// Read stdin on a goroutine so the loop can still observe ctx cancellation
+	// Read input on a goroutine so the loop can still observe ctx cancellation
 	// while a read is blocked.
 	lines := make(chan string)
 	go func() {
@@ -144,6 +163,8 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 		}
 	}()
 
+	var wg sync.WaitGroup
+	defer wg.Wait() // in-flight handlers finish (and respond) before returning
 	for {
 		select {
 		case <-ctx.Done():
@@ -154,21 +175,33 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 				s.log.Info("stdin closed, exiting")
 				return nil
 			}
-			s.handleLine(ctx, line, enc)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.handleLine(ctx, line, write)
+			}()
 		}
 	}
 }
 
 // handleLine parses one line and, when it is a request (has an id), writes a
-// single response. Notifications and malformed lines produce no output.
-func (s *Server) handleLine(ctx context.Context, line string, enc *json.Encoder) {
+// single response via write. Notifications produce no output; an unparseable
+// line gets the JSON-RPC parse error (-32700, id null — or -32600 when the
+// JSON itself is valid but isn't a request object) so a client blocked
+// waiting on its response fails fast instead of hanging forever.
+func (s *Server) handleLine(ctx context.Context, line string, write func(rpcResponse)) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
 	}
 	var req rpcRequest
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		s.log.Warn("skipping malformed JSON-RPC line", "err", err)
+		s.log.Warn("malformed JSON-RPC line", "err", err)
+		if json.Valid([]byte(line)) {
+			write(s.fail(json.RawMessage("null"), -32600, "invalid request"))
+		} else {
+			write(s.fail(json.RawMessage("null"), -32700, "parse error"))
+		}
 		return
 	}
 	// Notifications carry no id and must never be answered.
@@ -176,10 +209,7 @@ func (s *Server) handleLine(ctx context.Context, line string, enc *json.Encoder)
 		s.log.Debug("notification", "method", req.Method)
 		return
 	}
-	resp := s.dispatch(ctx, req)
-	if err := enc.Encode(resp); err != nil {
-		s.log.Error("writing response", "err", err)
-	}
+	write(s.dispatch(ctx, req))
 }
 
 // dispatch routes a request to the matching method handler.

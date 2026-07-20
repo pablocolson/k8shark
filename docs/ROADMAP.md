@@ -316,12 +316,34 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   `TestSingleTokenFallback`, `TestWorkerTokenOnlyKeepsReadsOpen`
   (auth_test.go) ; `go test -race ./...` (235 tests) propre.
 
+**Backlog, lot 6 — MCP-6, conformité JSON-RPC et concurrence :**
+
+- **MCP-6** : une ligne JSON malformée reçoit désormais l'erreur `-32700`
+  (id null) exigée par la spec — et `-32600` quand le JSON est valide mais
+  n'est pas un objet requête — au lieu d'être silencieusement ignorée (le
+  client restait bloqué en attente) ; la boucle n'est plus séquentielle :
+  `serve()` (extrait de `ServeStdio`, flux injectables donc testable sur
+  pipes mémoire) dispatch chaque requête dans sa goroutine avec un mutex
+  d'écriture sur stdout, donc un `tools/call` lent (timeout HTTP hub 10 s)
+  ne bloque plus les `ping` ni les autres appels — les réponses sont
+  appariées par id, l'ordre n'est pas contractuel. Un `WaitGroup` garantit
+  que les réponses en vol partent avant la sortie. Le volet « tests du
+  package » de MCP-6 était déjà couvert par TST-6 ; `protocol_test.go` mis
+  à jour (le test de discipline stdout attend maintenant les erreurs
+  -32700/-32600, id null toléré uniquement pour elles) + nouveau
+  `TestServeConcurrentCalls` (le ping répond avant le tools/call lent).
+
+  Vérifié en conditions réelles (CLI MCP stdio réelle contre hub + worker
+  démo réels) au 2026-07-20 : ligne malformée → `-32700` id null, `[1,2,3]`
+  → `-32600`, initialize/get_stats corrects, arrivée désordonnée confirmant
+  le dispatch concurrent. `go test -race ./...` (236 tests) propre.
+
 Reste du backlog hors Phase 3 : CAP-5/7/8, DIS-6/7/8/9/10/11, HUB-4/6,
-UI-7/8/11, MCP-1/4/6/8, OPS-6/7/10, SEC-7, TST-5/8,
+UI-7/8/11, MCP-1/4/8, OPS-6/7/10, SEC-7, TST-5/8,
 EXT-2/3/4/5.
 Prochain chantier logique : d'autres items S/M de ce backlog (SEC-7 apporte le
-TLS hub et clôt le thème sécurité ; MCP-6 durcit le protocole JSON-RPC), ou le
-démarrage de la **Phase 3** (gros
+TLS hub et clôt le thème sécurité ; MCP-8 documente l'installation du serveur
+MCP), ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 

@@ -229,37 +229,48 @@ func TestArgIntCoercion(t *testing.T) {
 }
 
 // TestHandleLineOutputDiscipline feeds a mixed sequence of lines through
-// handleLine and asserts every byte written is a valid JSON-RPC response with
-// an id (stdout is the protocol channel — nothing else may appear), that
-// requests each get exactly one response, and that a notification and a
-// malformed line produce none.
+// handleLine and asserts every byte written is a valid JSON-RPC response
+// (stdout is the protocol channel — nothing else may appear), that requests
+// each get exactly one response, that a notification and a blank line produce
+// none, and that a malformed line gets the spec-mandated parse error (-32700,
+// id null; -32600 when the JSON is valid but not a request object) instead of
+// leaving the client hanging (MCP-6).
 func TestHandleLineOutputDiscipline(t *testing.T) {
 	s := New("http://hub.invalid", "", false, discardLogger())
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
+	write := func(resp rpcResponse) {
+		if err := enc.Encode(resp); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx := context.Background()
 
 	lines := []string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize"}`, // request -> response
 		`{"jsonrpc":"2.0","id":2,"method":"ping"}`,       // request -> response
 		`{"jsonrpc":"2.0","method":"notifications/x"}`,   // notification (no id) -> nothing
-		`{not valid json`, // malformed -> nothing (MCP-6: silently skipped today)
+		`{not valid json`, // malformed -> -32700, id null
+		`[1,2,3]`,         // valid JSON, not a request object -> -32600, id null
 		`   `,             // blank -> nothing
 		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`, // request -> response
 	}
 	for _, l := range lines {
-		s.handleLine(ctx, l, enc)
+		s.handleLine(ctx, l, write)
 	}
 
 	dec := json.NewDecoder(&out)
 	var responses int
 	seenIDs := map[float64]bool{}
+	var errCodes []float64
 	for dec.More() {
 		var resp struct {
 			JSONRPC string          `json:"jsonrpc"`
 			ID      *float64        `json:"id"`
 			Result  json.RawMessage `json:"result"`
-			Error   json.RawMessage `json:"error"`
+			Error   *struct {
+				Code float64 `json:"code"`
+			} `json:"error"`
 		}
 		if err := dec.Decode(&resp); err != nil {
 			t.Fatalf("stdout contained a non-JSON-RPC line: %v", err)
@@ -269,7 +280,12 @@ func TestHandleLineOutputDiscipline(t *testing.T) {
 			t.Errorf("response jsonrpc = %q, want 2.0", resp.JSONRPC)
 		}
 		if resp.ID == nil {
-			t.Errorf("response has no id: %+v", resp)
+			// Only the parse/invalid-request errors may carry a null id.
+			if resp.Error == nil {
+				t.Errorf("null-id response without an error object: %+v", resp)
+			} else {
+				errCodes = append(errCodes, resp.Error.Code)
+			}
 			continue
 		}
 		if resp.Result == nil && resp.Error == nil {
@@ -277,12 +293,56 @@ func TestHandleLineOutputDiscipline(t *testing.T) {
 		}
 		seenIDs[*resp.ID] = true
 	}
-	if responses != 3 {
-		t.Fatalf("wrote %d responses, want 3 (one per request; notification/malformed/blank produce none)", responses)
+	if responses != 5 {
+		t.Fatalf("wrote %d responses, want 5 (one per request + parse error + invalid request)", responses)
 	}
 	for _, id := range []float64{1, 2, 3} {
 		if !seenIDs[id] {
 			t.Errorf("no response for request id %v", id)
 		}
+	}
+	if len(errCodes) != 2 || errCodes[0] != -32700 || errCodes[1] != -32600 {
+		t.Errorf("null-id error codes = %v, want [-32700 -32600]", errCodes)
+	}
+}
+
+// TestServeConcurrentCalls locks the MCP-6 concurrency fix: a slow tools/call
+// (hub taking hundreds of ms) must not block a ping sent right after it — the
+// ping's response must reach the wire first. Also exercises serve() end to end
+// over in-memory streams: clean nil return on EOF, all responses written.
+func TestServeConcurrentCalls(t *testing.T) {
+	s, ts := fakeHub(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(api.Stats{})
+	}, "")
+	defer ts.Close()
+
+	in := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_stats"}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"ping"}` + "\n")
+	var out bytes.Buffer
+	if err := s.serve(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+
+	dec := json.NewDecoder(&out)
+	var ids []float64
+	for dec.More() {
+		var resp struct {
+			ID *float64 `json:"id"`
+		}
+		if err := dec.Decode(&resp); err != nil {
+			t.Fatalf("bad response line: %v", err)
+		}
+		if resp.ID == nil {
+			t.Fatal("response without id")
+		}
+		ids = append(ids, *resp.ID)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("got %d responses, want 2", len(ids))
+	}
+	if ids[0] != 2 {
+		t.Fatalf("first response id = %v, want 2 (ping must not wait behind the slow tools/call)", ids[0])
 	}
 }
