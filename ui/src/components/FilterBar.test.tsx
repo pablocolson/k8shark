@@ -23,6 +23,9 @@ const baseProps = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // recent-filter history (UI-6) persists across mounts via localStorage;
+  // clear it so tests don't leak into each other.
+  localStorage.clear();
   // useFields() hits GET /api/fields on mount; stub it out so tests don't
   // depend on (or wait on) a real network call.
   vi.stubGlobal(
@@ -88,6 +91,36 @@ describe("FilterBar", () => {
     expect(onApply).toHaveBeenCalledWith("response.status >= 500");
   });
 
+  it("offers a previously applied filter in the recent-history dropdown, and applies it on click", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(<FilterBar {...baseProps} onApply={onApply} />);
+
+    await user.click(screen.getByRole("button", { name: 'dst.namespace == "shop"' }));
+    onApply.mockClear();
+
+    // value stays "" in this isolated test (nothing re-flows the applied
+    // filter back down as the parent normally would), so the input is still
+    // empty -- focusing it should now offer the just-used filter as history.
+    await user.click(screen.getByRole("combobox", { name: /ifl filter/i }));
+    const option = await screen.findByRole("option", { name: 'dst.namespace == "shop"' });
+
+    await user.click(option);
+    expect(onApply).toHaveBeenCalledWith('dst.namespace == "shop"');
+  });
+
+  it("deduplicates repeated filters in the recent history instead of listing them twice", async () => {
+    const user = userEvent.setup();
+    render(<FilterBar {...baseProps} />);
+
+    const chip = screen.getByRole("button", { name: 'response.status >= 500' });
+    await user.click(chip);
+    await user.click(chip);
+
+    await user.click(screen.getByRole("combobox", { name: /ifl filter/i }));
+    expect(await screen.findAllByRole("option", { name: "response.status >= 500" })).toHaveLength(1);
+  });
+
   it("shows Resume with the paused count once paused, and Pause otherwise", () => {
     const { rerender } = render(<FilterBar {...baseProps} paused={false} />);
     expect(screen.getByRole("button", { name: /pause/i })).toBeInTheDocument();
@@ -117,9 +150,10 @@ describe("FilterBar", () => {
     expect(onViewChange).toHaveBeenCalledWith("map");
   });
 
-  it("renders the filter error banner when set", () => {
+  it("renders the filter error banner when set, as an aria-live alert", () => {
     render(<FilterBar {...baseProps} filterError='unexpected token "("' />);
-    expect(screen.getByText(/invalid filter/i)).toHaveTextContent('unexpected token "("');
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent('unexpected token "("');
   });
 
   it("shows the truncation note alongside the shown count", () => {

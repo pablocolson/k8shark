@@ -327,10 +327,18 @@ table.compare-meta .diff-row .kv-v { color: var(--warn); }
 .meta-v { font-size: 12px; }
 .detail-flow { display: flex; align-items: center; gap: 8px; padding: 14px 16px; }
 .ep-card { flex: 1; background: var(--bg-3); border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
+.ep-title-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .ep-title { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; }
+.ep-filter-btn { font-size: 12px; line-height: 1; padding: 0; }
 .ep-name { font-size: 13px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
 .ep-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-.arrow { color: var(--accent); font-size: 18px; }
+.arrow {
+  color: var(--accent); font-size: 18px; background: transparent; border: none;
+  cursor: pointer; padding: 4px; border-radius: 4px; line-height: 1;
+  transition: background 0.12s ease;
+}
+.arrow:hover:not(:disabled) { background: var(--hover-bg); }
+.arrow:disabled { cursor: default; opacity: 0.6; }
 .section { padding: 4px 16px 14px; }
 .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent); margin: 12px 0 8px; font-weight: 600; }
 .subhead {
@@ -416,6 +424,23 @@ table.kv.rec .kv-k { width: 68px; color: var(--accent); }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* ---------- accessibility utilities ---------- */
+/* Visually hidden but readable by screen readers -- e.g. a copy button's
+   "copied to clipboard" confirmation, which has no visible-text equivalent
+   once the icon reverts (unlike CurlButton's "✓ copied", which is already
+   visible text but overridden by a static aria-label -- see UI-10). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---------- focus-visible ---------- */
 .icon-btn:focus-visible,
 .pill:focus-visible,
@@ -424,6 +449,7 @@ table.kv.rec .kv-k { width: 68px; color: var(--accent); }
 .tab:focus-visible,
 .toggle:focus-visible,
 .apply-btn:focus-visible,
+.arrow:focus-visible,
 .view-switch button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

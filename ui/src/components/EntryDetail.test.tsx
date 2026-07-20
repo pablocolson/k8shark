@@ -51,6 +51,28 @@ describe("EntryDetail", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("filters on the source/destination endpoint and follows the conversation, when onApply is provided", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(<EntryDetail entry={httpEntry} onClose={vi.fn()} onApply={onApply} />);
+
+    await user.click(screen.getByRole("button", { name: /filter on this source/i }));
+    expect(onApply).toHaveBeenLastCalledWith('dst.name == "frontend" or src.name == "frontend"');
+
+    await user.click(screen.getByRole("button", { name: /filter on this destination/i }));
+    expect(onApply).toHaveBeenLastCalledWith('dst.name == "backend" or src.name == "backend"');
+
+    await user.click(screen.getByRole("button", { name: /follow this conversation/i }));
+    expect(onApply).toHaveBeenLastCalledWith('src.name == "frontend" and dst.name == "backend"');
+  });
+
+  it("has no endpoint filter buttons and a disabled follow-conversation arrow without onApply", () => {
+    render(<EntryDetail entry={httpEntry} onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /filter on this source/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /filter on this destination/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /follow this conversation/i })).toBeDisabled();
+  });
+
   it("switches tabs on click and via ArrowRight keyboard navigation", async () => {
     const user = userEvent.setup();
     render(<EntryDetail entry={httpEntry} onClose={vi.fn()} />);
@@ -94,6 +116,9 @@ describe("EntryDetail", () => {
 
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(JSON.parse(writeText.mock.calls[0][0])).toEqual({ ok: true, count: 3 });
+    // Screen readers get an explicit confirmation (UI-10): the button's own
+    // aria-label is static and wouldn't otherwise announce the state change.
+    expect(await screen.findByText(/copied to clipboard/i)).toBeInTheDocument();
   });
 
   it("copies the request as a curl command from the header button", async () => {
@@ -106,6 +131,7 @@ describe("EntryDetail", () => {
 
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(writeText.mock.calls[0][0]).toBe("curl -X 'POST' 'http://backend/api/cart' -H 'content-type: application/json'");
+    expect(await screen.findByText(/copied to clipboard/i)).toBeInTheDocument();
   });
 
   it("does not show a curl button for a non-HTTP entry", () => {

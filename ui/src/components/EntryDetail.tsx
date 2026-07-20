@@ -1,11 +1,20 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { curlCommand } from "../curl";
+import { conversationClause, endpointClause } from "../iflClause";
 import type { Entry, L4Info, Payload, PGColumn, RawView } from "../types";
 
 type TabId = "overview" | "request" | "response" | "headers" | "body" | "raw" | "l4";
 
-export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => void }) {
+export function EntryDetail({
+  entry,
+  onClose,
+  onApply,
+}: {
+  entry: Entry;
+  onClose: () => void;
+  onApply?: (filter: string) => void;
+}) {
   const tabs = useMemo(() => visibleTabs(entry), [entry]);
   const [tab, setTab] = useState<TabId>("overview");
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
@@ -49,9 +58,22 @@ export function EntryDetail({ entry, onClose }: { entry: Entry; onClose: () => v
       </div>
 
       <div className="detail-flow">
-        <EndpointCard title="source" ep={entry.src} />
-        <div className="arrow">→</div>
-        <EndpointCard title="destination" ep={entry.dst} />
+        <EndpointCard title="source" ep={entry.src} onFilter={onApply && (() => onApply(endpointClause(entry.src)))} />
+        <button
+          type="button"
+          className="arrow"
+          disabled={!onApply}
+          onClick={() => onApply?.(conversationClause(entry.src, entry.dst))}
+          title="follow this conversation — filter to just this src/dst pair"
+          aria-label="follow this conversation — filter to just this src/dst pair"
+        >
+          →
+        </button>
+        <EndpointCard
+          title="destination"
+          ep={entry.dst}
+          onFilter={onApply && (() => onApply(endpointClause(entry.dst)))}
+        />
       </div>
 
       <div className="tabs" role="tablist" aria-label="entry detail sections" onKeyDown={onTabKeyDown}>
@@ -503,10 +525,31 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function EndpointCard({ title, ep }: { title: string; ep: Entry["src"] }) {
+function EndpointCard({
+  title,
+  ep,
+  onFilter,
+}: {
+  title: string;
+  ep: Entry["src"];
+  onFilter?: () => void;
+}) {
   return (
     <div className="ep-card">
-      <div className="ep-title">{title}</div>
+      <div className="ep-title-row">
+        <div className="ep-title">{title}</div>
+        {onFilter && (
+          <button
+            type="button"
+            className="icon-btn ep-filter-btn"
+            onClick={onFilter}
+            title={`filter on this ${title}`}
+            aria-label={`filter on this ${title} (${ep.name || ep.ip})`}
+          >
+            ⌕
+          </button>
+        )}
+      </div>
       <div className="ep-name mono">{ep.name || ep.ip}</div>
       <div className="ep-sub mono">
         {ep.namespace ? `${ep.namespace} · ` : ""}
@@ -545,6 +588,9 @@ function CurlButton({ entry }: { entry: Entry }) {
       aria-label="copy this request as a curl command"
     >
       {copied ? "✓ copied" : "curl"}
+      <span className="sr-only" aria-live="polite">
+        {copied ? "copied to clipboard" : ""}
+      </span>
     </button>
   );
 }
@@ -569,6 +615,9 @@ function CopyButton({ text, label }: { text: string; label: string }) {
       aria-label={`copy ${label}`}
     >
       {copied ? "✓" : "⧉"}
+      <span className="sr-only" aria-live="polite">
+        {copied ? "copied to clipboard" : ""}
+      </span>
     </button>
   );
 }

@@ -29,6 +29,34 @@ const EXAMPLES = [
   'request.path contains "checkout"',
 ];
 
+// Recently-applied filters, persisted client-side so a returning session (or
+// a typo-prone IFL expression) doesn't have to be retyped from scratch.
+const RECENT_FILTERS_KEY = "k8shark.recentFilters";
+const RECENT_FILTERS_CAP = 10;
+
+function loadRecentFilters(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_FILTERS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // corrupt/inaccessible storage — start fresh
+  }
+  return [];
+}
+
+// Records f as the most recent filter (deduplicated, capped), persisting the
+// result. A blank filter (cleared, not "applied") is a no-op.
+function saveRecentFilter(filters: string[], f: string): string[] {
+  if (!f) return filters;
+  const next = [f, ...filters.filter((x) => x !== f)].slice(0, RECENT_FILTERS_CAP);
+  try {
+    localStorage.setItem(RECENT_FILTERS_KEY, JSON.stringify(next));
+  } catch {
+    // storage full/disabled — history just won't survive a reload
+  }
+  return next;
+}
+
 interface Props {
   value: string;
   onApply: (f: string) => void;
@@ -71,6 +99,7 @@ export function FilterBar({
   // Enter case below — auto-highlighting index 0 made Enter silently pick a
   // suggestion instead of applying an already-complete, valid filter).
   const [highlightIndex, setHighlightIndex] = useState(-1);
+  const [recentFilters, setRecentFilters] = useState<string[]>(() => loadRecentFilters());
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -82,13 +111,28 @@ export function FilterBar({
   const ctx = useMemo(() => contextAt(draft, caret), [draft, caret]);
   const { items, hint } = useSuggestItems(ctx, fields, byName, lazyValues);
 
+  // An empty, focused input offers recent filter history instead of the full
+  // (and, empty, unfiltered) field-name list — much more likely to be what's
+  // wanted at that exact moment. Falls back to the normal suggestions once
+  // there's no history yet (first run) or the user starts typing.
+  const showingRecent = draft === "" && recentFilters.length > 0;
+  const activeCount = showingRecent ? recentFilters.length : items.length;
+
+  // Applies f (a full IFL expression, not a token) and records it as the most
+  // recently used filter — shared by the recent-history list, Enter/Tab on a
+  // highlighted history item, and the static EXAMPLES chips below.
+  const applyAndRecord = (f: string) => {
+    setRecentFilters((prev) => saveRecentFilter(prev, f));
+    onApply(f);
+  };
+
   // Reset the highlight whenever the candidate list changes shape, and open
   // the dropdown only while the input is actually focused (avoids it
   // reappearing after a filter is applied and focus has moved elsewhere).
   useEffect(() => {
     setHighlightIndex(-1);
-    setOpen(focused && (items.length > 0 || !!hint));
-  }, [focused, items, hint]);
+    setOpen(focused && (activeCount > 0 || !!hint));
+  }, [focused, activeCount, hint]);
 
   const updateCaretFrom = (el: HTMLInputElement) => setCaret(el.selectionStart ?? el.value.length);
 
@@ -110,15 +154,15 @@ export function FilterBar({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (!open || items.length === 0) return;
+    if (!open || activeCount === 0) return;
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();
-        setHighlightIndex((i) => (i + 1) % items.length);
+        setHighlightIndex((i) => (i + 1) % activeCount);
         return;
       case "ArrowUp":
         e.preventDefault();
-        setHighlightIndex((i) => (i <= 0 ? items.length - 1 : i - 1));
+        setHighlightIndex((i) => (i <= 0 ? activeCount - 1 : i - 1));
         return;
       case "Enter": {
         // Only intercept Enter when the user has actually navigated to a
@@ -126,6 +170,15 @@ export function FilterBar({
         // the form's onSubmit so a fully-typed, valid filter applies on
         // Enter like any other text input, instead of silently picking
         // whatever suggestion happens to be listed first.
+        if (showingRecent) {
+          const f = recentFilters[highlightIndex];
+          if (f) {
+            e.preventDefault();
+            setOpen(false);
+            applyAndRecord(f);
+          }
+          return;
+        }
         const item = items[highlightIndex];
         if (item) {
           e.preventDefault();
@@ -135,6 +188,14 @@ export function FilterBar({
         return;
       }
       case "Tab": {
+        if (showingRecent) {
+          const f = recentFilters[highlightIndex];
+          if (f) {
+            setOpen(false);
+            applyAndRecord(f);
+          }
+          return;
+        }
         const item = items[highlightIndex];
         if (item) {
           // Don't preventDefault: let focus move on as Tab normally would,
@@ -160,7 +221,7 @@ export function FilterBar({
         onSubmit={(e) => {
           e.preventDefault();
           setOpen(false);
-          onApply(draft.trim());
+          applyAndRecord(draft.trim());
         }}
       >
         <span className="filter-prompt">ifl›</span>
@@ -174,7 +235,11 @@ export function FilterBar({
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls="filter-suggest-listbox"
-          aria-activedescendant={open && items[highlightIndex] ? `filter-suggest-opt-${highlightIndex}` : undefined}
+          aria-activedescendant={
+            open && (showingRecent ? recentFilters[highlightIndex] : items[highlightIndex])
+              ? `filter-suggest-opt-${highlightIndex}`
+              : undefined
+          }
           value={draft}
           spellCheck={false}
           onChange={(e) => {
@@ -188,16 +253,37 @@ export function FilterBar({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
         />
-        {open && (
-          <FilterSuggest
-            ctx={ctx}
-            byName={byName}
-            items={items}
-            hint={hint}
-            highlightIndex={highlightIndex}
-            onPick={handlePick}
-          />
-        )}
+        {open &&
+          (showingRecent ? (
+            <div className="suggest" role="listbox" id="filter-suggest-listbox" aria-label="recent filters">
+              {recentFilters.map((f, i) => (
+                <div
+                  key={f}
+                  id={`filter-suggest-opt-${i}`}
+                  role="option"
+                  aria-selected={i === highlightIndex}
+                  className={`suggest-item${i === highlightIndex ? " active" : ""}`}
+                  onMouseDown={(e) => {
+                    // mousedown (not click) fires before the input's blur handler.
+                    e.preventDefault();
+                    setOpen(false);
+                    applyAndRecord(f);
+                  }}
+                >
+                  <span className="suggest-label mono">{f}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <FilterSuggest
+              ctx={ctx}
+              byName={byName}
+              items={items}
+              hint={hint}
+              highlightIndex={highlightIndex}
+              onPick={handlePick}
+            />
+          ))}
         {draft && (
           <button type="button" className="icon-btn" title="clear filter" aria-label="clear filter" onClick={() => { setDraft(""); setOpen(false); onApply(""); }}>
             ✕
@@ -208,10 +294,14 @@ export function FilterBar({
         </button>
       </form>
 
-      {filterError && <div className="filter-error">invalid filter: {filterError}</div>}
+      {filterError && (
+        <div className="filter-error" role="alert">
+          invalid filter: {filterError}
+        </div>
+      )}
 
       <div className="filter-actions">
-        <span className="count">
+        <span className="count" aria-live="polite">
           {count} shown{truncated ? ` · showing latest ${MAX_ENTRIES}` : ""}
         </span>
         {historicalRange ? (
@@ -239,7 +329,7 @@ export function FilterBar({
 
       <div className="examples">
         {EXAMPLES.map((ex) => (
-          <button key={ex} className="chip" onClick={() => onApply(ex)}>
+          <button key={ex} className="chip" onClick={() => applyAndRecord(ex)}>
             {ex}
           </button>
         ))}

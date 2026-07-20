@@ -89,7 +89,7 @@ export function StatsHeader({
         </span>
       )}
 
-      <div className={`conn ${connected ? "on" : "off"}`}>
+      <div className={`conn ${connected ? "on" : "off"}`} aria-live="polite">
         <span className="conn-dot" />
         {connected ? "live" : "reconnecting…"}
       </div>

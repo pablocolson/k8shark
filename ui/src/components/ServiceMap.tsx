@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Entry, Endpoint } from "../types";
+import { endpointClause } from "../iflClause";
 
 interface Node {
   id: string;
@@ -183,8 +184,6 @@ export function ServiceMap({
     setHover({ x: e.clientX - rect.left, y: e.clientY - rect.top, title, rows });
   };
 
-  const nodeClause = (n: Node) =>
-    n.name ? `dst.name == "${n.name}" or src.name == "${n.name}"` : `dst.ip == "${n.ip}" or src.ip == "${n.ip}"`;
 
   if (nodes.length === 0) {
     return <div className="map-empty">No traffic yet — the service map builds itself from live flows.</div>;
@@ -303,7 +302,7 @@ export function ServiceMap({
               ["errors", `${n.errIn} (${errPct}%)`],
             ];
             const tt = (ev: React.MouseEvent) => showTooltip(ev, n.label, rows);
-            const activate = () => onNodeClick?.(nodeClause(n));
+            const activate = () => onNodeClick?.(endpointClause(n));
             // Mouse users get the rich hover tooltip; keyboard/AT users get the
             // same numbers folded into the accessible name instead, since a
             // cursor-anchored tooltip has no meaningful position on focus.

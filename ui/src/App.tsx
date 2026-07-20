@@ -173,7 +173,7 @@ export function App() {
             onCompare={() => setShowCompare(true)}
           />
           {selectedLive && (
-            <EntryDetail entry={selectedLive} onClose={() => setSelected(null)} />
+            <EntryDetail entry={selectedLive} onClose={() => setSelected(null)} onApply={onApply} />
           )}
           {showCompare && pinned.length === 2 && (
             <CompareView a={pinned[0]} b={pinned[1]} onClose={() => setShowCompare(false)} />
