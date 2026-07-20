@@ -32,7 +32,7 @@ spec:
       containers:
         - name: worker
           image: {{ include "k8shark.binaryImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ include "k8shark.imagePullPolicy" . }}
           args:
             - worker
             - --hub=ws://k8shark-hub.{{ .Release.Namespace }}.svc:{{ .Values.hub.port }}/ws/worker

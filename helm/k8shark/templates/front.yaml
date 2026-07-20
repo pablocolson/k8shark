@@ -19,7 +19,7 @@ spec:
       containers:
         - name: front
           image: {{ include "k8shark.frontImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ include "k8shark.imagePullPolicy" . }}
           env:
             # nginx proxies /api and /ws to the hub service.
             - name: HUB_HOST

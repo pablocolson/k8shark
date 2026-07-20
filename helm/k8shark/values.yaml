@@ -7,11 +7,12 @@ image:
   # front image is nginx serving the built dashboard
   front: k8shark-front
   tag: latest
-  # NOTE: tag "latest" + pullPolicy IfNotPresent causes silent no-op upgrades —
-  # nodes that already cached an old "latest" keep running it. Set pullPolicy to
-  # Always when tag is "latest"; IfNotPresent is fine (and preferred) for pinned
-  # immutable tags.
-  pullPolicy: IfNotPresent
+  # pullPolicy: leave empty (default) to let the chart choose automatically —
+  # Always for a mutable "latest"/empty tag (so an upgrade actually re-pulls
+  # instead of a node's cached "latest" silently causing a no-op upgrade) and
+  # IfNotPresent for a pinned immutable tag. Set explicitly to override either
+  # way. See templates/_helpers.tpl's k8shark.imagePullPolicy.
+  pullPolicy: ""
 
 # priorityClassName is applied to the hub pods when set (empty = cluster default).
 priorityClassName: ""
@@ -143,5 +144,22 @@ networkPolicy:
   # addition to any pod already in this namespace — e.g. your ingress
   # controller's namespace or pods, if it doesn't run in this namespace.
   frontExtraFrom: []
+
+# metrics: the hub's /metrics endpoint (Prometheus text format) is always on;
+# this section only controls discovery. The pod template already carries
+# prometheus.io/scrape annotations (legacy annotation-based discovery) — the
+# ServiceMonitor below is for a prometheus-operator setup instead.
+metrics:
+  serviceMonitor:
+    # enabled: off by default since it requires the monitoring.coreos.com/v1
+    # ServiceMonitor CRD (prometheus-operator) to be installed in the cluster
+    # — the chart fails loudly rather than silently skipping it if you turn
+    # this on without that CRD present (see templates/servicemonitor.yaml).
+    enabled: false
+    interval: 30s
+    # additionalLabels: merged onto the ServiceMonitor, e.g. to match the
+    # `serviceMonitorSelector` your prometheus-operator Prometheus resource
+    # uses (often release: <prometheus-release-name>).
+    additionalLabels: {}
 
 logLevel: info

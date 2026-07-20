@@ -1,0 +1,23 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+{{- fail "metrics.serviceMonitor.enabled is true but this cluster has no monitoring.coreos.com/v1 ServiceMonitor CRD (prometheus-operator not installed). Install prometheus-operator first, or set metrics.serviceMonitor.enabled=false and rely on the pod's prometheus.io/scrape annotations instead." }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: k8shark-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8shark.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8shark-hub
+  endpoints:
+    - port: hub
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
+{{- end }}

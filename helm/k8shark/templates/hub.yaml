@@ -70,6 +70,14 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: k8shark-hub
+      annotations:
+        # Legacy annotation-based Prometheus discovery (e.g. a scrape config
+        # using kubernetes_sd_configs against pods). A prometheus-operator
+        # setup should use metrics.serviceMonitor.enabled instead. Harmless
+        # when nothing scrapes annotations.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.hub.port | quote }}
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: k8shark-hub
       {{- with .Values.priorityClassName }}
@@ -82,7 +90,7 @@ spec:
       containers:
         - name: hub
           image: {{ include "k8shark.binaryImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ include "k8shark.imagePullPolicy" . }}
           args:
             - hub
             - --port={{ .Values.hub.port }}
