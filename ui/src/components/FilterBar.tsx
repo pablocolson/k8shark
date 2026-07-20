@@ -5,8 +5,20 @@ import { useFields } from "../useFields";
 import { MAX_ENTRIES } from "../useHub";
 import { downloadFile, entriesToCSV, entriesToJSON } from "../export";
 import { entriesToPcap } from "../pcap";
+import type { HistoricalRange } from "../useHub";
 import type { Entry } from "../types";
 import { FilterSuggest, pickInsertion, useSuggestItems } from "./FilterSuggest";
+
+// rangeLabel renders a historical selection compactly for the "back to
+// live" button; rangeTitle spells out the full dates in a hover tooltip
+// (the button text alone drops the date, which matters across midnight).
+function rangeLabel(r: HistoricalRange): string {
+  const fmt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour12: false });
+  return `${fmt(r.since)}–${fmt(r.until)}`;
+}
+function rangeTitle(r: HistoricalRange): string {
+  return `viewing ${new Date(r.since).toLocaleString([], { hour12: false })} to ${new Date(r.until).toLocaleString([], { hour12: false })}`;
+}
 
 const EXAMPLES = [
   'http.method == "POST"',
@@ -30,6 +42,8 @@ interface Props {
   truncated: boolean;
   filterError: string | null;
   entries: Entry[];
+  historicalRange: HistoricalRange | null;
+  onReturnToLive: () => void;
 }
 
 export function FilterBar({
@@ -45,6 +59,8 @@ export function FilterBar({
   truncated,
   filterError,
   entries,
+  historicalRange,
+  onReturnToLive,
 }: Props) {
   const [draft, setDraft] = useState(value);
   const [caret, setCaret] = useState(value.length);
@@ -198,9 +214,15 @@ export function FilterBar({
         <span className="count">
           {count} shown{truncated ? ` · showing latest ${MAX_ENTRIES}` : ""}
         </span>
-        <button className={`toggle ${paused ? "active" : ""}`} onClick={onTogglePause}>
-          {paused ? `▶ Resume${pausedCount > 0 ? ` (${pausedCount} new)` : ""}` : "⏸ Pause"}
-        </button>
+        {historicalRange ? (
+          <button className="toggle active" onClick={onReturnToLive} title={rangeTitle(historicalRange)}>
+            ◀ back to live ({rangeLabel(historicalRange)})
+          </button>
+        ) : (
+          <button className={`toggle ${paused ? "active" : ""}`} onClick={onTogglePause}>
+            {paused ? `▶ Resume${pausedCount > 0 ? ` (${pausedCount} new)` : ""}` : "⏸ Pause"}
+          </button>
+        )}
         <button className="toggle" onClick={onClear}>
           Clear
         </button>

@@ -17,6 +17,8 @@ const baseProps = {
   truncated: false,
   filterError: null,
   entries: [] as Entry[],
+  historicalRange: null,
+  onReturnToLive: vi.fn(),
 };
 
 beforeEach(() => {
@@ -158,5 +160,22 @@ describe("FilterBar", () => {
 
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a back-to-live button instead of Pause while viewing a historical range", async () => {
+    const user = userEvent.setup();
+    const onReturnToLive = vi.fn();
+    render(
+      <FilterBar
+        {...baseProps}
+        historicalRange={{ since: "2026-01-01T12:00:00.000Z", until: "2026-01-01T12:05:00.000Z" }}
+        onReturnToLive={onReturnToLive}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: /pause/i })).not.toBeInTheDocument();
+    const backBtn = screen.getByRole("button", { name: /back to live/i });
+    await user.click(backBtn);
+    expect(onReturnToLive).toHaveBeenCalledTimes(1);
   });
 });

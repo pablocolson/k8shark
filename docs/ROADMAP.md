@@ -19,7 +19,7 @@ TST-1, TST-4 sont tous implémentés (commits `983b696`, `33ba9f1`, `b796e21`,
 **Phase 1 — terminée (5/5).** SEC-1, SEC-2, SEC-3, SEC-4/OPS-5, HUB-8
 implémentés (commits `ec1a47f`, `5a985d2`).
 
-**Phase 2 — en cours (8/9).**
+**Phase 2 — terminée (9/9).**
 
 - CAP-1 : programme cBPF généré au runtime (`internal/worker/capture/bpf.go`,
   symbolique via `golang.org/x/net/bpf`, vérifié par `bpf.VM` sur des trames
@@ -83,9 +83,21 @@ implémentés (commits `ec1a47f`, `5a985d2`).
   de défiler reste visuellement en place pendant que des centaines
   d'entrées arrivent au-dessus.
 
-Prochain item logique par valeur/effort : **UI-2** (timeline/histogramme
-cliquable, M) ou **DIS-5** (sniff Redis/Postgres/AMQP sur ports non
-standard, S).
+- UI-2 : bande histogramme cliquable sous la FilterBar (`ui/src/components/Timeline.tsx`,
+  `ui/src/useTimeline.ts`, SVG maison, barres empilées ok/warning/error
+  depuis `/api/timeline`) — glisser-déposer à la souris sélectionne une
+  plage qui charge `/api/entries?since&until&filter` dans la table
+  (`useHub.loadRange`, flux live mis en pause) ; bouton « ◀ back to live »
+  dans la FilterBar (`useHub.returnToLive`, réutilise le mécanisme de replay
+  existant sur changement de filtre). Vérifié en navigateur avec du trafic
+  démo réel : survol → tooltip, glisser-déposer → snapshot historique
+  chargé, retour au live → flux repris normalement.
+
+**Phase 2 est maintenant terminée (9/9).** Prochain chantier logique : les
+items S/M restants hors Phase 2/3 (ex. **DIS-5**, sniff Redis/Postgres/AMQP
+sur ports non standard) ou le démarrage de la **Phase 3** (gros chantiers :
+DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1 tap
+targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 
 ## Phases proposées
 

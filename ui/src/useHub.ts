@@ -26,6 +26,11 @@ function wsURL(filter: string): string {
   return `${proto}//${location.host}/ws${q}`;
 }
 
+export interface HistoricalRange {
+  since: string;
+  until: string;
+}
+
 export interface HubState {
   entries: Entry[];
   stats: Stats | null;
@@ -41,6 +46,10 @@ export interface HubState {
   loadingOlder: boolean;
   noMoreHistory: boolean;
   statsHistory: StatsPoint[];
+  historicalRange: HistoricalRange | null;
+  loadingRange: boolean;
+  loadRange: (since: string, until: string) => void;
+  returnToLive: () => void;
 }
 
 // useHub owns the live connection: it streams entries, keeps a bounded rolling
@@ -62,6 +71,12 @@ export function useHub(initialFilter: string): HubState {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [noMoreHistory, setNoMoreHistory] = useState(false);
   const [statsHistory, setStatsHistory] = useState<StatsPoint[]>([]);
+  // Set while the table is showing a brushed-in-the-timeline snapshot
+  // (/api/entries?since&until) instead of the live tail. The live WS
+  // connection stays open throughout (paused, so its entries are dropped
+  // rather than mixed in) — returnToLive() just re-triggers a fresh replay.
+  const [historicalRange, setHistoricalRange] = useState<HistoricalRange | null>(null);
+  const [loadingRange, setLoadingRange] = useState(false);
   // The effective cap live flushes trim to. Starts at MAX_ENTRIES but is
   // raised by loadOlder() so a deliberate "load more history" click doesn't
   // get silently trimmed back away by the next live-traffic flush.
@@ -247,6 +262,39 @@ export function useHub(initialFilter: string): HubState {
     }
   }, [connect]);
 
+  // Loads a brushed timeline selection: pauses the live stream (so its
+  // entries are dropped, not mixed into the snapshot) and replaces the shown
+  // entries with the [since, until) window from the REST history endpoint.
+  const loadRange = useCallback((since: string, until: string) => {
+    setPaused(true);
+    setLoadingRange(true);
+    const q = new URLSearchParams({ since, until, limit: "1000" });
+    if (filterRef.current) q.set("filter", filterRef.current);
+    fetch(`/api/entries?${q}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((snapshot: Entry[]) => {
+        bufRef.current = [];
+        setEntries(snapshot);
+        setTruncated(false);
+        setNoMoreHistory(false);
+        setHistoricalRange({ since, until });
+      })
+      .catch(() => {
+        // Transient fetch failure — historicalRange stays unset, so the UI
+        // stays in whatever state it was (still paused; the user can retry).
+      })
+      .finally(() => setLoadingRange(false));
+  }, []);
+
+  // Leaves historical-snapshot mode: re-applying the current filter makes the
+  // hub replay its recent buffer fresh over the existing socket (the same
+  // mechanism a live filter change already uses), then un-pauses.
+  const returnToLive = useCallback(() => {
+    setHistoricalRange(null);
+    applyFilter(filterRef.current);
+    togglePause(false);
+  }, [applyFilter, togglePause]);
+
   const clear = useCallback(() => {
     bufRef.current = [];
     setEntries([]);
@@ -302,6 +350,10 @@ export function useHub(initialFilter: string): HubState {
     loadingOlder,
     noMoreHistory,
     statsHistory,
+    historicalRange,
+    loadingRange,
+    loadRange,
+    returnToLive,
   };
 }
 

@@ -185,6 +185,14 @@ export interface StatsPoint {
   totalEntries: number;
 }
 
+// TimelineBucket is one fixed-width slice of GET /api/timeline.
+export interface TimelineBucket {
+  start: string;
+  entries: number;
+  errors: number;
+  warnings: number;
+}
+
 // WorkerInfo is one row of GET /api/workers.
 export interface WorkerInfo {
   node: string;

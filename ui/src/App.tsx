@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useHub } from "./useHub";
 import { StatsHeader } from "./components/StatsHeader";
 import { FilterBar } from "./components/FilterBar";
+import { Timeline } from "./components/Timeline";
 import { TrafficTable } from "./components/TrafficTable";
 import { EntryDetail } from "./components/EntryDetail";
 import { ServiceMap } from "./components/ServiceMap";
@@ -145,7 +146,10 @@ export function App() {
         truncated={hub.truncated}
         filterError={hub.filterError}
         entries={hub.entries}
+        historicalRange={hub.historicalRange}
+        onReturnToLive={hub.returnToLive}
       />
+      <Timeline filter={filter} onRangeSelect={hub.loadRange} />
       {view === "list" ? (
         <div className="main split">
           <TrafficTable
