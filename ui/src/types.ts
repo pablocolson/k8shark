@@ -172,6 +172,9 @@ export interface Entry {
   statusCode: number;
   l4?: L4Info;
   seq?: number;
+  // EXT-3: end-to-end correlation id (traceparent trace-id / x-request-id /
+  // x-correlation-id), when the request carried one. Filter via trace.id.
+  traceId?: string;
 }
 
 export interface Stats {

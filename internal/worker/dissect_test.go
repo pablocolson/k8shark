@@ -1119,6 +1119,64 @@ func TestHTTPInterimResponseNotPaired(t *testing.T) {
 	}
 }
 
+// TestHTTPTraceIDExtraction (EXT-3) checks that an end-to-end correlation id is
+// surfaced on the top-level Entry from the request headers, with the W3C
+// traceparent 32-hex trace-id taking precedence over x-request-id, then
+// x-correlation-id, and empty when no correlation header is present.
+func TestHTTPTraceIDExtraction(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736" // 32-hex W3C trace-id
+	cases := []struct {
+		name    string
+		headers string // extra request header lines, each already CRLF-terminated
+		want    string
+	}{
+		{
+			name:    "traceparent trace-id",
+			headers: "traceparent: 00-" + traceID + "-00f067aa0ba902b7-01\r\n",
+			want:    traceID,
+		},
+		{
+			name:    "traceparent wins over x-request-id",
+			headers: "traceparent: 00-" + traceID + "-00f067aa0ba902b7-01\r\nX-Request-Id: req-abc-123\r\n",
+			want:    traceID,
+		},
+		{
+			name:    "x-request-id only",
+			headers: "X-Request-Id: req-abc-123\r\n",
+			want:    "req-abc-123",
+		},
+		{
+			name:    "x-correlation-id fallback",
+			headers: "X-Correlation-Id: corr-xyz-789\r\n",
+			want:    "corr-xyz-789",
+		},
+		{
+			name:    "no correlation header",
+			headers: "",
+			want:    "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSink("", "", "n", discardLogger())
+			p := newPipeline(s, "n", discardLogger())
+			rNet, rTr, sNet, sTr := flows(40800, 80)
+
+			req := "GET /x HTTP/1.1\r\nHost: h\r\n" + c.headers + "\r\n"
+			p.consumeHTTP(rNet, rTr, strings.NewReader(req))
+			p.consumeHTTP(sNet, sTr, strings.NewReader("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+
+			got := drain(s)
+			if len(got) != 1 {
+				t.Fatalf("got %d entries, want 1", len(got))
+			}
+			if got[0].TraceID != c.want {
+				t.Errorf("TraceID = %q, want %q", got[0].TraceID, c.want)
+			}
+		})
+	}
+}
+
 // --- SEC-8: allocation bounds — oversized payloads are discarded, not buffered
 
 // A DataRow bigger than pgMaxPayload (a large resultset column, e.g. bytea)

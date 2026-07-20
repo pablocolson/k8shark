@@ -239,6 +239,12 @@ type Entry struct {
 	// aging out of the ring buffer (unlike an ID-based anchor). Zero on
 	// entries from a hub that predates this field.
 	Seq int64 `json:"seq,omitempty"`
+	// TraceID is an end-to-end correlation id extracted from an HTTP request's
+	// headers (EXT-3): the W3C traceparent trace-id, else x-request-id, else
+	// x-correlation-id. It lets a single request be followed across the
+	// front->api->db chain (filter field trace.id). Empty when no correlation
+	// header was present; never fabricated.
+	TraceID string `json:"traceId,omitempty"`
 }
 
 // --- Wire messages ---------------------------------------------------------

@@ -306,6 +306,41 @@ func TestHTTPHeaderFilterFields(t *testing.T) {
 	}
 }
 
+// trace.id (EXT-3) resolves against the top-level Entry.TraceID: it matches an
+// entry carrying that correlation id and not others, and never matches an entry
+// with no trace id.
+func TestCompileFilterTraceID(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	e := &api.Entry{Protocol: api.ProtocolHTTP, TraceID: traceID}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`trace.id == "` + traceID + `"`, true},
+		{`trace.id == "deadbeef"`, false},
+		{`trace.id contains "929d"`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	// An entry without a trace id must not match.
+	pred, err := CompileFilter(`trace.id == "` + traceID + `"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pred(&api.Entry{Protocol: api.ProtocolHTTP}) {
+		t.Error("trace.id matched an entry with no TraceID")
+	}
+}
+
 // Numeric L4 fields must not spuriously match when L4 is absent (missing => ""
 // not "0").
 func TestL4FieldMissingIsEmpty(t *testing.T) {

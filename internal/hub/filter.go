@@ -504,6 +504,10 @@ func fieldGetter(field string) func(*api.Entry) string {
 		return func(e *api.Entry) string { return e.Request.Flags }
 	case "summary":
 		return func(e *api.Entry) string { return e.Request.Summary + " " + e.Response.Summary }
+	case "trace.id", "traceid":
+		// EXT-3: end-to-end correlation id (traceparent trace-id / x-request-id
+		// / x-correlation-id) extracted into the top-level Entry.TraceID.
+		return func(e *api.Entry) string { return e.TraceID }
 
 	// --- richer sub-object fields (WS3) — all nil-guarded ------------------
 	case "http.version":

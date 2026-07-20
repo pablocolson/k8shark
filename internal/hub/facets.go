@@ -84,6 +84,10 @@ var fieldCatalog = []FieldSpec{
 	{Name: "packets", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "flags", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "summary", Type: FieldTypeFreetext, Operators: opsText, TrackValues: false},
+	// EXT-3: end-to-end correlation id (traceparent trace-id / x-request-id /
+	// x-correlation-id) extracted from HTTP request headers into Entry.TraceID.
+	// Per-request, unbounded cardinality, so freetext and not value-tracked.
+	{Name: "trace.id", Type: FieldTypeFreetext, Operators: opsText, TrackValues: false},
 
 	// Richer sub-object fields (WS3). Enum/low-cardinality fields are tracked;
 	// freetext and high-cardinality numerics are not (see performance bounds).

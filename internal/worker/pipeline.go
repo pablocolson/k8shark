@@ -255,6 +255,12 @@ func (p *pipeline) completeResponse(key string, resp api.Payload, statusCode int
 		StatusCode:  statusCode,
 		Status:      status,
 	}
+	// EXT-3: surface an end-to-end correlation id (W3C traceparent trace-id /
+	// x-request-id / x-correlation-id) from the request headers as a top-level
+	// Entry field, so a request can be followed across services. Only the HTTP
+	// path populates Payload.Headers (see flattenHeaders), so this is a no-op
+	// for the other protocols.
+	entry.TraceID = correlationID(pr.req.Headers)
 	// Snapshot L4 after p.mu is released (snapshotL4 takes only flowMu, never
 	// nested inside mu). May be nil for a capture that started mid-connection.
 	entry.L4 = p.snapshotL4(key)
@@ -1201,6 +1207,55 @@ func (p *pipeline) flattenHeaders(h http.Header) map[string]string {
 		out[lk] = strings.Join(v, ", ")
 	}
 	return out
+}
+
+// correlationID extracts an end-to-end trace/request id from an HTTP request's
+// headers (EXT-3), which flattenHeaders has already lowercased the keys of.
+// Precedence: the W3C traceparent trace-id, else x-request-id, else
+// x-correlation-id. Returns "" when none is present — the id is never
+// fabricated. A traceparent that doesn't yield a valid trace-id falls through
+// to the x-request-id/x-correlation-id headers rather than being surfaced raw.
+func correlationID(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	if id := traceparentTraceID(headers["traceparent"]); id != "" {
+		return id
+	}
+	if id := headers["x-request-id"]; id != "" {
+		return id
+	}
+	return headers["x-correlation-id"]
+}
+
+// traceparentTraceID returns the 32-hex trace-id from a W3C traceparent value,
+// which is the second hyphen-delimited field of
+// "00-<32hextrace>-<16hexspan>-<flags>". Returns "" when the value doesn't have
+// that shape (so the caller can fall back to another correlation header).
+func traceparentTraceID(tp string) string {
+	if tp == "" {
+		return ""
+	}
+	parts := strings.Split(tp, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+	id := parts[1]
+	if len(id) != 32 || !isHexString(id) {
+		return ""
+	}
+	return id
+}
+
+// isHexString reports whether s is entirely hex digits (either case).
+func isHexString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // truncate shortens s to at most n runes, appending an ellipsis when cut.

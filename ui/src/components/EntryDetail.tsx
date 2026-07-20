@@ -128,6 +128,25 @@ export function EntryDetail({
         <Meta k="time" v={new Date(entry.timestamp).toLocaleString([], { hour12: false })} />
       </div>
 
+      {/* EXT-3: end-to-end trace/request id, with a pivot to every entry sharing
+          it — mirrors the endpoint/conversation onApply actions below. */}
+      {entry.traceId && (
+        <div className="detail-meta detail-trace">
+          <Meta k="trace" v={entry.traceId} />
+          {onApply && (
+            <button
+              type="button"
+              className="toggle"
+              onClick={() => onApply(`trace.id == "${entry.traceId}"`)}
+              title="view whole trace — filter to every entry sharing this trace/request id"
+              aria-label="view whole trace — filter to every entry sharing this trace/request id"
+            >
+              view whole trace
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="detail-flow">
         <EndpointCard title="source" ep={entry.src} onFilter={onApply && (() => onApply(endpointClause(entry.src)))} />
         <button
