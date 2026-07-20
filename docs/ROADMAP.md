@@ -532,13 +532,57 @@ marshals :**
   Vérifié au 2026-07-20 : `gofmt`/`go vet`/`go build`/`go test -race ./...`
   (278 tests) et `vitest`/`npm run build` (100 tests) propres.
 
-Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/10/11,
-UI-8, OPS-6/10, TST-5/8, EXT-2/3/4 (EXT-5 partiel : hygiène GitHub faite,
-screenshots + réf IFL restants).
+**Backlog, lot 13 — troisième vague multi-agents (DIS-10, OPS-6, UI-8) :**
+
+- **DIS-10** : résilience à la perte de segments TCP —
+  `tcpStreamFactory.New` active `ReaderStream.LossErrors`, donc un segment
+  perdu remonte en `tcpreader.DataLost` au lieu d'un splice silencieux. Un
+  wrapper `lossReader` (interposé par `consumeStream` avant
+  `consumeStreamID`) purge sur DataLost les requêtes pendantes de la
+  connexion (`purgePending` : `delete(p.conns, key)`, invariant « jamais de
+  paire fausse après un trou »), incrémente `tcpLossEvents`, draine le reste
+  via `DiscardBytesToEOF` (le stream est reprenable, `io.Copy` bloquerait au
+  trou suivant) et rend EOF pour couper proprement cette direction ; les
+  octets pré-trou déjà bufferisés sont parsés normalement. Le resync in-band
+  par protocole est explicitement différé (trop risqué en une passe pour le
+  dispatch unique HTTP/PG/Redis/AMQP/DNS-TCP/WS). Compteur câblé de bout en
+  bout (`WorkerStats.TCPLossEvents` → `/api/workers` →
+  `k8shark_worker_tcp_loss_events_total`). Tests
+  `TestLossReaderTruncatesDrainsAndCounts` (isolé) et
+  `TestTCPLossPurgesPendingAndCounts` (bout-en-bout Redis).
+- **OPS-6** : ClusterRole du manifest statique `deploy/k8shark.yaml`
+  resserré pour coller au chart et à ce que `internal/hub/k8s.go` lit
+  réellement — `pods`/`services` (core) + `replicasets` (apps) en get/list,
+  suppression du verbe `watch` et de tout le reste (endpoints, namespaces,
+  nodes, endpointslices, deployments, daemonsets, statefulsets). Le
+  securityContext du worker est laissé tel quel (intention eBPF/PSA
+  documentée pour cette config Talos+Cilium mono-fichier). Anti-dérive :
+  cible `make deploy-manifest-check` qui rend le chart, normalise les règles
+  de chaque ClusterRole et échoue si le manifest accorde plus que le chart,
+  branchée dans le job CI helm-lint.
+- **UI-8** : coût de la table à 10k+ entrées — le tri se recalculait à
+  chaque frame rAF (l'array `entries` reçoit une identité neuve à chaque
+  flush, donc le `useMemo` existant re-triait quand même). Tri actif =
+  snapshot figé du buffer trié une seule fois (mémoïsé sur la clé de tri,
+  pas sur `entries`), bandeau « stream figé, N new — clic pour synchro »
+  (réutilise la pastille new-entries) ; `selectedLive` passe d'un
+  `entries.find()` O(n) par rendu à un lookup O(1) via une Map id→entrée
+  mémoïsée dans App.tsx. Ancrage scroll/nav clavier/pin/virtualisation
+  préservés. Taille de buffer configurable laissée de côté (hors scope,
+  FilterBar). Tests `describe "sort freeze under live streaming (UI-8)"`
+  (5 cas dont sélection sur 5000 entrées).
+
+  Vérifié au 2026-07-20 : `gofmt`/`go vet`/`go build`/`go test -race ./...`
+  (280 tests) + `vitest`/`npm run build` (105 tests) propres ;
+  `k8shark_worker_tcp_loss_events_total` présent sur `/metrics`,
+  `make deploy-manifest-check` OK, RBAC deploy vérifié.
+
+Reste du backlog hors Phase 3 : CAP-7/8, DIS-8/11,
+OPS-10, TST-5/8, EXT-2/3/4 (EXT-5 fait : hygiène GitHub + réf IFL ;
+screenshots/GIF restants).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : TST-5 (lint Go + eslint), OPS-6 (dérive du
-manifest deploy/ — dépend du choix RBAC de HUB-6, désormais get/list
-inchangé), DIS-10 (résilience perte de segments), UI-8 (perf table),
+Prochain chantier logique : TST-5 (lint Go + eslint), EXT-3 (corrélation
+trace/request ID), DIS-8/DIS-11 (dissecteurs Kafka/MySQL/Mongo),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

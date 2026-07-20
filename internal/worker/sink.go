@@ -72,6 +72,13 @@ type sink struct {
 	// closed with a clean truncation instead of misparsing past a hole.
 	tlsLagDrops atomic.Uint64
 
+	// tcpLossEvents counts AF_PACKET TCP stream directions truncated after a
+	// lost segment surfaced as tcpreader.DataLost (LossErrors): the
+	// connection's pending requests are purged and the direction dropped, so
+	// the FIFO request/response pairing can't silently desync across the hole
+	// (see pipeline.go lossReader). Set by the pipeline via p.sink.tcpLossEvents.
+	tcpLossEvents atomic.Uint64
+
 	mu   sync.Mutex
 	conn *websocket.Conn
 }
@@ -240,6 +247,7 @@ func (s *sink) pump(ctx context.Context) {
 				RingDrops:     s.ringDrops.Load(),
 				FlowsEvicted:  s.flowsEvicted.Load(),
 				TLSLagDrops:   s.tlsLagDrops.Load(),
+				TCPLossEvents: s.tcpLossEvents.Load(),
 			}})
 			if err != nil {
 				continue

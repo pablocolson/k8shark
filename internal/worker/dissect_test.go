@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/tcpassembly/tcpreader"
 	"github.com/pablocolson/k8shark/pkg/api"
 )
 
@@ -1397,4 +1398,123 @@ func TestWebSocketGarbledFrameNoPanic(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- TCP segment-loss resilience (DIS-10) -----------------------------------
+
+// lossChunk is one segment served by lossyReader: data bytes, or (with empty
+// data) a single terminal error to return once.
+type lossChunk struct {
+	data []byte
+	err  error
+}
+
+// lossyReader mimics a tcpreader.ReaderStream with LossErrors enabled: it serves
+// its chunks' bytes in order, returns each chunk's error once (tcpreader reports
+// DataLost as (0, DataLost), i.e. an empty-data chunk carrying DataLost), and
+// finally io.EOF. It lets the DIS-10 tests inject a lost segment without having
+// to drive a real tcpassembly.Assembler with Skip!=0 reassemblies.
+type lossyReader struct {
+	chunks []lossChunk
+}
+
+func (r *lossyReader) Read(p []byte) (int, error) {
+	for len(r.chunks) > 0 {
+		c := &r.chunks[0]
+		if len(c.data) > 0 {
+			n := copy(p, c.data)
+			c.data = c.data[n:]
+			if len(c.data) == 0 && c.err == nil {
+				r.chunks = r.chunks[1:]
+			}
+			return n, nil
+		}
+		err := c.err
+		r.chunks = r.chunks[1:]
+		if err != nil {
+			return 0, err
+		}
+	}
+	return 0, io.EOF
+}
+
+func (r *lossyReader) chunkExhausted() bool { return len(r.chunks) == 0 }
+
+// A lossReader must fire onLoss exactly once on a DataLost, drain everything
+// past the gap (so tcpassembly is never left blocked on an unread stream), and
+// then report io.EOF — never surfacing the post-gap bytes to the dissector.
+func TestLossReaderTruncatesDrainsAndCounts(t *testing.T) {
+	var losses int
+	inner := &lossyReader{chunks: []lossChunk{
+		{data: []byte("before")},
+		{err: tcpreader.DataLost},
+		{data: []byte("after-the-gap")}, // must be drained, never delivered
+	}}
+	lr := &lossReader{r: inner, onLoss: func() { losses++ }}
+
+	got, err := io.ReadAll(lr) // io.ReadAll stops at the io.EOF lossReader returns
+	if err != nil {
+		t.Fatalf("ReadAll err = %v, want nil (EOF is normal termination)", err)
+	}
+	if string(got) != "before" {
+		t.Errorf("delivered %q, want only the pre-gap %q (post-gap bytes must be dropped)", got, "before")
+	}
+	if losses != 1 {
+		t.Errorf("onLoss fired %d times, want exactly 1", losses)
+	}
+	if !inner.chunkExhausted() {
+		t.Error("underlying stream was not drained to EOF — tcpassembly could block")
+	}
+}
+
+// End to end: a lost segment in the response direction must purge the
+// connection's pending requests and truncate the direction, so a valid pre-gap
+// reply still pairs but no post-gap reply is emitted against the wrong request —
+// and the loss is counted for /api/workers + /metrics.
+func TestTCPLossPurgesPendingAndCounts(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40000, redisPort)
+
+	// Two requests, both fully sent before any loss (request direction is clean).
+	req := "*2\r\n$3\r\nGET\r\n$1\r\na\r\n" + "*2\r\n$3\r\nGET\r\n$1\r\nb\r\n"
+	p.consumeStream(rNet, rTr, strings.NewReader(req))
+
+	key := connKey(rNet, rTr)
+	if got := pendingCount(p, key); got != 2 {
+		t.Fatalf("pending requests = %d, want 2 before the response direction runs", got)
+	}
+
+	// Response direction: the reply to GET a, then a lost segment, then a stray
+	// reply that (post-gap) can no longer be trusted to belong to GET b.
+	resp := &lossyReader{chunks: []lossChunk{
+		{data: []byte("$1\r\nX\r\n")},
+		{err: tcpreader.DataLost},
+		{data: []byte("$1\r\nY\r\n")},
+	}}
+	p.consumeStream(sNet, sTr, resp)
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1 (only the pre-gap GET a/X pair; the gap must drop the rest)", len(got))
+	}
+	if got[0].Request.Command != "GET a" || got[0].Response.Summary != "X" {
+		t.Errorf("entry = %q -> %q, want GET a -> X", got[0].Request.Command, got[0].Response.Summary)
+	}
+	if n := pendingCount(p, key); n != 0 {
+		t.Errorf("pending requests = %d after loss, want 0 (GET b must be purged, not mispaired)", n)
+	}
+	if got := s.tcpLossEvents.Load(); got != 1 {
+		t.Errorf("tcpLossEvents = %d, want 1", got)
+	}
+}
+
+// pendingCount reports how many requests are still awaiting a response on key.
+func pendingCount(p *pipeline, key string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cs := p.conns[key]; cs != nil {
+		return len(cs.reqs)
+	}
+	return 0
 }

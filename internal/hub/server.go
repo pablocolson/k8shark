@@ -242,6 +242,7 @@ type workerInfo struct {
 	RingDrops     uint64    `json:"ringDrops"`     // AF_PACKET kernel ring: cumulative packets dropped before userspace saw them
 	FlowsEvicted  uint64    `json:"flowsEvicted"`  // generic L4 flows dropped by the worker's maxFlows cap
 	TLSLagDrops   uint64    `json:"tlsLagDrops"`   // eBPF TLS streams truncated after a backpressure drop
+	TCPLossEvents uint64    `json:"tcpLossEvents"` // AF_PACKET TCP directions truncated after a lost segment (FIFO desync guard)
 }
 
 func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
@@ -322,6 +323,7 @@ func (s *Server) handleWorker(w http.ResponseWriter, r *http.Request) {
 					wi.RingDrops = ws.RingDrops
 					wi.FlowsEvicted = ws.FlowsEvicted
 					wi.TLSLagDrops = ws.TLSLagDrops
+					wi.TCPLossEvents = ws.TCPLossEvents
 					wi.LastSeen = time.Now()
 				})
 			}
@@ -1091,6 +1093,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "# TYPE k8shark_worker_tls_lag_drops_total counter\n")
 		for _, wi := range workers {
 			fmt.Fprintf(&b, "k8shark_worker_tls_lag_drops_total{node=%q} %d\n", wi.Node, wi.TLSLagDrops)
+		}
+		fmt.Fprintf(&b, "# HELP k8shark_worker_tcp_loss_events_total AF_PACKET TCP stream directions truncated after a lost segment (FIFO pairing desync guard).\n")
+		fmt.Fprintf(&b, "# TYPE k8shark_worker_tcp_loss_events_total counter\n")
+		for _, wi := range workers {
+			fmt.Fprintf(&b, "k8shark_worker_tcp_loss_events_total{node=%q} %d\n", wi.Node, wi.TCPLossEvents)
 		}
 	}
 

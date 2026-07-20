@@ -6,6 +6,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -266,6 +267,10 @@ type tcpStreamFactory struct{ p *pipeline }
 
 func (f *tcpStreamFactory) New(netFlow, transport gopacket.Flow) tcpassembly.Stream {
 	r := tcpreader.NewReaderStream()
+	// Surface a lost segment (AF_PACKET ring drop, FlushOlderThan discard) as a
+	// tcpreader.DataLost error from Read instead of silently splicing over the
+	// hole — see lossReader for how that is turned into a clean truncation.
+	r.LossErrors = true
 	go f.p.consumeStream(netFlow, transport, &r)
 	return &r
 }
@@ -275,8 +280,85 @@ func (f *tcpStreamFactory) New(netFlow, transport gopacket.Flow) tcpassembly.Str
 // work, keyed off connID rather than gopacket flows, so the same dispatch also
 // serves eBPF-decrypted TLS streams (see tls_pipeline.go), which have no
 // gopacket.Flow to offer.
+//
+// The AF_PACKET reader is wrapped in a lossReader so a dropped TCP segment
+// (the ReaderStream has LossErrors enabled) purges this connection's pending
+// requests and truncates the direction rather than desyncing the FIFO pairing.
+// The eBPF TLS path calls consumeStreamID directly (it has its own Lagged
+// handling, see tls_pipeline.go) and so is unaffected.
 func (p *pipeline) consumeStream(netFlow, transport gopacket.Flow, r io.Reader) {
-	p.consumeStreamID(connIDFromFlows(netFlow, transport), r)
+	c := connIDFromFlows(netFlow, transport)
+	key := c.key()
+	lr := &lossReader{r: r, onLoss: func() {
+		p.purgePending(key)
+		p.sink.tcpLossEvents.Add(1)
+	}}
+	p.consumeStreamID(c, lr)
+}
+
+// lossReader wraps an AF_PACKET tcpreader.ReaderStream (with LossErrors
+// enabled) and converts a lost TCP segment — which tcpassembly would otherwise
+// skip over silently, desyncing the FIFO request/response pairing for the rest
+// of the connection — into a clean, loud truncation of the direction:
+//
+//  1. onLoss purges the connection's pending requests (better to drop a few
+//     pairs than emit every subsequent one mispaired — see completeResponse's
+//     documented FIFO limitation) and counts the event (surfaced at
+//     /api/workers and /metrics as k8shark_worker_tcp_loss_events_total),
+//  2. whatever remains on the stream is drained to EOF (so tcpassembly's
+//     Reassembled never blocks on an unread stream), and
+//  3. io.EOF is returned to the dissector, which stops this direction cleanly
+//     instead of parsing across the hole.
+//
+// We deliberately truncate rather than attempt an in-band resync: the single
+// consumeStreamID dispatch feeds the HTTP, Postgres, Redis, AMQP, DNS-over-TCP
+// and WebSocket dissectors, and a robust "scan to the next message boundary"
+// differs per protocol and is easy to get subtly wrong in one pass. Dropping
+// the rest of the direction is the conservative choice that upholds the
+// invariant: never emit a mispaired entry after a known gap. Because the
+// bufio.Reader each dissector wraps around this reader still holds any bytes it
+// buffered *before* the gap, those valid pre-gap messages are parsed as usual;
+// only post-gap bytes are discarded.
+type lossReader struct {
+	r      io.Reader
+	onLoss func()
+	done   bool
+}
+
+func (l *lossReader) Read(p []byte) (int, error) {
+	if l.done {
+		return 0, io.EOF
+	}
+	n, err := l.r.Read(p)
+	if errors.Is(err, tcpreader.DataLost) {
+		if l.onLoss != nil {
+			l.onLoss()
+		}
+		// Drain the rest of the stream past the gap so reassembly isn't blocked
+		// on an unread stream; DiscardBytesToEOF (unlike io.Copy) reads through
+		// any further DataLost errors until the real EOF.
+		tcpreader.DiscardBytesToEOF(l.r)
+		l.done = true
+		if n > 0 {
+			// tcpreader always reports DataLost with n==0, but stay correct if a
+			// wrapper ever returns pre-gap bytes alongside it: deliver them now
+			// and report EOF on the next call (the l.done guard above).
+			return n, nil
+		}
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+// purgePending drops every pending (unanswered) request on a connection. It is
+// called when a lost TCP segment is detected on either direction: FIFO pairing
+// (completeResponse) cannot survive a hole, so each still-outstanding request
+// is discarded rather than risk pairing it — and every later response — against
+// the wrong message.
+func (p *pipeline) purgePending(key string) {
+	p.mu.Lock()
+	delete(p.conns, key)
+	p.mu.Unlock()
 }
 
 // consumeStreamID routes one direction of a TCP connection to the right

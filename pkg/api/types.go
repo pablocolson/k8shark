@@ -314,6 +314,12 @@ type WorkerStats struct {
 	// backpressure forced the drop of one of their interior chunks — the
 	// stream is closed with a clean truncation instead of being misparsed.
 	TLSLagDrops uint64 `json:"tlsLagDrops,omitempty"`
+	// TCPLossEvents counts AF_PACKET TCP stream directions truncated after a
+	// lost segment surfaced as tcpreader.DataLost (LossErrors): the
+	// connection's pending requests are purged and the direction dropped,
+	// rather than misparsing — and mispairing — across the hole. See
+	// internal/worker/pipeline.go lossReader.
+	TCPLossEvents uint64 `json:"tcpLossEvents,omitempty"`
 }
 
 // WindowStats is a trailing-window slice of traffic, for "current" rates as
