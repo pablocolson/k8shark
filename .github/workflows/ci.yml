@@ -92,6 +92,13 @@ jobs:
       - uses: azure/setup-helm@v4
       - run: helm lint helm/k8shark
 
+      # Anti-drift guard (OPS-6): fail if the hand-maintained deploy/k8shark.yaml
+      # ClusterRole grants more than the canonical chart's (helm/k8shark). Uses
+      # helm (above) + ruby (preinstalled on ubuntu-latest); see the Makefile
+      # target for the semantic-rule comparison.
+      - name: deploy manifest drift check
+        run: make deploy-manifest-check
+
   docker:
     name: Build & push images
     needs: [go, ui, helm-lint]

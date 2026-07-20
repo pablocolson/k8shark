@@ -53,6 +53,11 @@ metadata:
   namespace: k8shark
   labels: { app.kubernetes.io/part-of: k8shark }
 ---
+# Read-only IP->workload enrichment permissions for the hub. These rules must
+# stay identical to the chart's ClusterRole (helm/k8shark/templates/hub.yaml)
+# and to exactly what internal/hub/k8s.go reads: listPods (pods), listServices
+# (services) and listReplicaSetOwners (apps/replicasets), get/list only — no
+# watch. `make deploy-manifest-check` (and CI) fails if this drifts wider.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -60,14 +65,11 @@ metadata:
   labels: { app.kubernetes.io/part-of: k8shark }
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "endpoints", "namespaces", "nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
   - apiGroups: ["apps"]
-    resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
-    verbs: ["get", "list", "watch"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
