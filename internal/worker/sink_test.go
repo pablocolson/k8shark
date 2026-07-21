@@ -75,6 +75,76 @@ func TestSinkReaderPause(t *testing.T) {
 	waitFor(false)
 }
 
+// TestSinkReaderNotifiesPauseChangedOnlyOnRealTransitions checks the signal
+// captureLoop relies on to actually close/reopen the AF_PACKET source: it
+// must fire on a genuine flip, and must NOT fire when the hub resends the
+// same state (which would otherwise make captureLoop redundantly close an
+// already-closed source, or reopen an already-open one).
+func TestSinkReaderNotifiesPauseChangedOnlyOnRealTransitions(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var hubConn *websocket.Conn
+	connected := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("hub-side upgrade: %v", err)
+			return
+		}
+		hubConn = c
+		close(connected)
+	}))
+	defer srv.Close()
+
+	s := newSink("ws://"+srv.Listener.Addr().String(), "", "n", discardLogger())
+	if err := s.connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	<-connected
+	defer hubConn.Close()
+
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	go s.reader(conn)
+
+	send := func(paused bool) {
+		b, _ := json.Marshal(api.Envelope{Type: api.MsgWorkerCommand, WorkerCommand: &api.WorkerCommand{Paused: paused}})
+		if err := hubConn.WriteMessage(websocket.TextMessage, b); err != nil {
+			t.Fatalf("hub write: %v", err)
+		}
+	}
+	drainNotify := func(want bool) {
+		t.Helper()
+		// Proving a real transition fires can need to wait out the reader
+		// goroutine's scheduling; proving a no-op resend does NOT fire only
+		// needs long enough to rule out a slow, wrongly-fired signal, so a
+		// short bound there keeps the common (no-op) case fast.
+		timeout := 100 * time.Millisecond
+		if want {
+			timeout = 2 * time.Second
+		}
+		select {
+		case <-s.pauseChanged:
+			if !want {
+				t.Fatal("pauseChanged fired for a no-op resend")
+			}
+		case <-time.After(timeout):
+			if want {
+				t.Fatal("pauseChanged never fired for a real transition")
+			}
+		}
+	}
+
+	send(true) // false -> true: real transition
+	drainNotify(true)
+
+	send(true) // true -> true: resend, no transition
+	drainNotify(false)
+
+	send(false) // true -> false: real transition
+	drainNotify(true)
+}
+
 // TestSetHubCA covers the SEC-7 CA loading paths: a bad path and a PEM
 // without certificates must error; a valid CA installs a custom dialer.
 func TestSetHubCA(t *testing.T) {

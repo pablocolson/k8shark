@@ -48,11 +48,21 @@ type sink struct {
 	captureTLS  atomic.Bool // eBPF TLS capture active
 
 	// capturePaused is set remotely by the hub (MsgWorkerCommand, see
-	// reader()) via POST /api/workers/capture. AF_PACKET/eBPF sources stay
-	// open either way — route()/consumeTLS check this and drop what they
-	// read before doing any reassembly/dissection work, so toggling it back
-	// off is instant rather than needing a reconnect.
+	// reader()) via POST /api/workers/capture. eBPF stays attached either
+	// way — consumeTLS checks this and drops what it reads before doing any
+	// reassembly/dissection work. AF_PACKET is different: captureLoop closes
+	// the live source on pause and reopens it on resume (see pauseChanged),
+	// so the kernel ring genuinely stops filling and its ~48MB mmap is
+	// freed — resume costs a fresh socket+mmap+BPF-filter setup instead of
+	// being instant, which is the tradeoff for the CPU/RAM actually going
+	// down while paused.
 	capturePaused atomic.Bool
+
+	// pauseChanged wakes captureLoop the moment capturePaused actually flips,
+	// instead of polling it once per packet/tick. Buffered 1 and drained
+	// non-blocking on send: only the latest state matters, so a burst of
+	// commands collapses to a single wakeup rather than queuing every edge.
+	pauseChanged chan struct{}
 
 	// ringPackets/ringDrops mirror the AF_PACKET kernel ring's own cumulative
 	// counters (captureLoop probes capture.PacketSource.Stats periodically).
@@ -85,12 +95,13 @@ type sink struct {
 
 func newSink(hubURL, hubToken, node string, log *slog.Logger) *sink {
 	return &sink{
-		hubURL:   hubURL,
-		hubToken: hubToken,
-		node:     node,
-		log:      log,
-		dialer:   websocket.DefaultDialer,
-		ch:       make(chan *api.Entry, 1024),
+		hubURL:       hubURL,
+		hubToken:     hubToken,
+		node:         node,
+		log:          log,
+		dialer:       websocket.DefaultDialer,
+		ch:           make(chan *api.Entry, 1024),
+		pauseChanged: make(chan struct{}, 1),
 	}
 }
 
@@ -205,8 +216,14 @@ func (s *sink) reader(conn *websocket.Conn) {
 			continue
 		}
 		if env.Type == api.MsgWorkerCommand && env.WorkerCommand != nil {
-			s.capturePaused.Store(env.WorkerCommand.Paused)
+			prev := s.capturePaused.Swap(env.WorkerCommand.Paused)
 			s.log.Info("capture pause state set by hub", "paused", env.WorkerCommand.Paused)
+			if prev != env.WorkerCommand.Paused {
+				select {
+				case s.pauseChanged <- struct{}{}:
+				default: // captureLoop hasn't drained the last wakeup yet — it'll re-check paused() then anyway
+				}
+			}
 		}
 	}
 }
