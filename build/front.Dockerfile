@@ -14,5 +14,9 @@ FROM nginx:1.27-alpine
 # and an unsubstituted ${HUB_TOKEN} would be sent as a literal header.
 COPY build/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /ui/dist /usr/share/nginx/html
+# The chart runs this container as the non-root `nginx` user (uid 101) with
+# all capabilities dropped, so it can't chown these at startup like the
+# stock image does when started as root — pre-own them at build time instead.
+RUN chown -R nginx:nginx /var/cache/nginx /etc/nginx/conf.d /run
 ENV HUB_HOST=k8shark-hub HUB_PORT=8898 HUB_SCHEME=http HUB_TOKEN=""
 EXPOSE 80
