@@ -108,9 +108,19 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	}
 	p.applyCaptureOpts(opts)
 
+	// AF_PACKET ring geometry (see afpacketComputeSize) — reused verbatim by
+	// reopenLive below so a post-pause reopen matches the startup config.
+	const snaplen = 65536
+
 	// Offline pcap ingest (EXT-2) takes precedence over live capture and needs
 	// no privileges — replay a file through the same dissectors.
 	var src capture.PacketSource
+	// reopenLive recreates the AF_PACKET source exactly as it was opened
+	// below; nil unless that succeeds. captureLoop calls it to reopen the
+	// kernel ring on resume after closing it on pause (see captureLoop and
+	// sink.pauseChanged) — pcap replay and demo have no such source to
+	// toggle, so they leave this nil and keep today's instant pause/resume.
+	var reopenLive func() (capture.PacketSource, error)
 	if opts.PcapFile != "" {
 		fs, err := capture.NewFileSource(opts.PcapFile)
 		if err != nil {
@@ -120,7 +130,7 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 		defer src.Close()
 		s.captureLive.Store(true)
 		log.Info("pcap file ingest started", "node", opts.Node, "path", opts.PcapFile)
-	} else if live, err := capture.NewLive(opts.Iface, 65536, capturePorts(opts)); err != nil {
+	} else if live, err := capture.NewLive(opts.Iface, snaplen, capturePorts(opts)); err != nil {
 		// AF_PACKET (plaintext L3/L4/L7) — best effort. A failure here does NOT
 		// fall back to synthetic traffic: demo is opt-in (--demo) only, so a
 		// broken capture surfaces loudly instead of masquerading as realistic
@@ -130,9 +140,15 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 			"hint", "worker likely not root or missing NET_RAW; pass --demo for synthetic traffic")
 	} else {
 		src = live
-		defer src.Close()
+		// Owned by captureLoop from here on (including at shutdown): it may
+		// replace src with a freshly reopened one across a pause/resume
+		// cycle, so this function no longer knows which handle is live by
+		// the time Run() returns — no defer src.Close() here.
 		s.captureLive.Store(true)
 		log.Info("AF_PACKET capture started", "node", opts.Node, "iface", opts.Iface)
+		reopenLive = func() (capture.PacketSource, error) {
+			return capture.NewLive(opts.Iface, snaplen, capturePorts(opts))
+		}
 	}
 
 	// eBPF TLS (decrypted plaintext) — independent of AF_PACKET, so it still
@@ -148,7 +164,7 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 			"hint", "check privileges (root, NET_RAW, BPF) or pass --demo for synthetic traffic")
 	}
 
-	return captureLoop(ctx, log, p, src)
+	return captureLoop(ctx, log, p, src, reopenLive)
 }
 
 // Bounds on tcpassembly's out-of-order reassembly buffer (gopacket pages are
@@ -171,15 +187,21 @@ const (
 // src may be nil (AF_PACKET unavailable): the gc/flush loop still runs so an
 // eBPF-TLS-only worker prunes its pipeline state, and it blocks until ctx is
 // cancelled rather than exiting.
-func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture.PacketSource) error {
-	var (
-		assembler *tcpassembly.Assembler
-		packets   <-chan gopacket.Packet
-	)
+//
+// reopen recreates src exactly as it was first opened; non-nil only for a
+// live AF_PACKET source (see Run). When set, a hub pause/resume command
+// (p.sink.pauseChanged) closes src — actually stopping the kernel ring and
+// freeing its mmap, not just gating route() — and reopens it on resume.
+// pcap replay and demo pass reopen == nil and keep the prior instant-toggle
+// behavior: pausing them wouldn't free any comparable resource, and a pcap
+// file's channel closing on EOF must still read as "done", not "paused".
+func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture.PacketSource, reopen func() (capture.PacketSource, error)) error {
+	assembler := tcpassembly.NewAssembler(tcpassembly.NewStreamPool(&tcpStreamFactory{p: p}))
+	assembler.MaxBufferedPagesTotal = maxBufferedPagesTotal
+	assembler.MaxBufferedPagesPerConnection = maxBufferedPagesPerConnection
+
+	var packets <-chan gopacket.Packet
 	if src != nil {
-		assembler = tcpassembly.NewAssembler(tcpassembly.NewStreamPool(&tcpStreamFactory{p: p}))
-		assembler.MaxBufferedPagesTotal = maxBufferedPagesTotal
-		assembler.MaxBufferedPagesPerConnection = maxBufferedPagesPerConnection
 		packets = src.Packets()
 	}
 
@@ -191,11 +213,43 @@ func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
-		case <-flush.C:
-			if assembler != nil {
-				assembler.FlushOlderThan(time.Now().Add(-2 * time.Minute))
+			// Only close what this loop itself may have reopened — a pcap/demo
+			// source (reopen == nil) is still owned by Run's own defer.
+			if src != nil && reopen != nil {
+				_ = src.Close()
 			}
+			return nil
+		case <-p.sink.pauseChanged:
+			if reopen == nil {
+				continue // nothing to close/reopen for this source kind
+			}
+			if p.sink.paused() {
+				if src == nil {
+					continue // already closed (e.g. a coalesced duplicate wakeup)
+				}
+				log.Info("capture paused by hub — closing the AF_PACKET source")
+				_ = src.Close()
+				src, packets = nil, nil
+				p.sink.captureLive.Store(false)
+			} else {
+				if src != nil {
+					continue // already open
+				}
+				newSrc, err := reopen()
+				if err != nil {
+					// Stays closed until the next pause/resume edge retries —
+					// captureLive=false at /api/workers makes this visible
+					// cluster-side rather than only in this log line.
+					log.Error("failed to reopen AF_PACKET capture on resume", "err", err)
+					continue
+				}
+				log.Info("capture resumed by hub — reopened the AF_PACKET source")
+				src = newSrc
+				packets = src.Packets()
+				p.sink.captureLive.Store(true)
+			}
+		case <-flush.C:
+			assembler.FlushOlderThan(time.Now().Add(-2 * time.Minute))
 			// Piggyback the ring-stats probe on the same 30s ticker rather
 			// than adding a dedicated one — this is a coarse "is the kernel
 			// dropping packets" gauge, not something that needs tighter
@@ -211,13 +265,14 @@ func captureLoop(ctx context.Context, log *slog.Logger, p *pipeline, src capture
 			p.flushFlows(20 * time.Second)
 		case pkt, ok := <-packets:
 			if !ok {
-				// AF_PACKET stream ended; stop selecting on it but keep the gc
-				// loop alive for any eBPF TLS capture still feeding the pipeline.
-				// A dead capture must be loud — and visible at /api/workers.
+				// AF_PACKET stream ended on its own (not via pause above);
+				// stop selecting on it but keep the gc loop alive for any
+				// eBPF TLS capture still feeding the pipeline. A dead capture
+				// must be loud — and visible at /api/workers.
 				log.Error("AF_PACKET packet stream ended — live capture stopped",
 					"hint", "no further plaintext traffic will be reported by this worker")
 				p.sink.captureLive.Store(false)
-				packets = nil
+				src, packets = nil, nil
 				continue
 			}
 			p.route(assembler, pkt)
