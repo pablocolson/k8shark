@@ -28,6 +28,10 @@ type Options struct {
 	Iface    string // capture interface ("" = any)
 	Demo     bool   // force synthetic traffic instead of live capture
 	DemoRPS  int    // synthetic entries/sec in demo mode
+	// PcapFile, when set, replays a pcap file through the dissectors instead of
+	// capturing live (offline analysis / dev without a cluster). Pure Go, so it
+	// works on any platform, unlike live AF_PACKET capture.
+	PcapFile string
 
 	// RESP (Redis wire protocol) port labelling. Valkey and Redis are wire
 	// identical, so the label is operator-supplied config, not wire-detected.
@@ -104,12 +108,24 @@ func Run(ctx context.Context, log *slog.Logger, opts Options) error {
 	}
 	p.applyCaptureOpts(opts)
 
-	// AF_PACKET (plaintext L3/L4/L7) — best effort. A failure here does NOT fall
-	// back to synthetic traffic: demo is opt-in (--demo) only, so a broken
-	// capture surfaces loudly instead of masquerading as realistic data (which
-	// once hid a non-root worker silently emitting a fake "shop" namespace).
+	// Offline pcap ingest (EXT-2) takes precedence over live capture and needs
+	// no privileges — replay a file through the same dissectors.
 	var src capture.PacketSource
-	if live, err := capture.NewLive(opts.Iface, 65536, capturePorts(opts)); err != nil {
+	if opts.PcapFile != "" {
+		fs, err := capture.NewFileSource(opts.PcapFile)
+		if err != nil {
+			return fmt.Errorf("opening --pcap-file: %w", err)
+		}
+		src = fs
+		defer src.Close()
+		s.captureLive.Store(true)
+		log.Info("pcap file ingest started", "node", opts.Node, "path", opts.PcapFile)
+	} else if live, err := capture.NewLive(opts.Iface, 65536, capturePorts(opts)); err != nil {
+		// AF_PACKET (plaintext L3/L4/L7) — best effort. A failure here does NOT
+		// fall back to synthetic traffic: demo is opt-in (--demo) only, so a
+		// broken capture surfaces loudly instead of masquerading as realistic
+		// data (which once hid a non-root worker silently emitting a fake
+		// "shop" namespace).
 		log.Error("AF_PACKET capture unavailable", "err", err,
 			"hint", "worker likely not root or missing NET_RAW; pass --demo for synthetic traffic")
 	} else {

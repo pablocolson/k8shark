@@ -686,15 +686,34 @@ marshals :**
   (`apiKey=Metadata`), champs dans `/api/fields`. `make lint`/`go test
   -race ./...` (0 échec)/`vitest` (105)/`build` propres.
 
-Reste du backlog hors Phase 3 : CAP-7/8, OPS-10, TST-8, EXT-2
-(EXT-5 fait sauf screenshots/GIF).
-Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Tous les dissecteurs L7 du backlog sont désormais livrés (DNS-TCP, WebSocket,
-MySQL, MongoDB, Kafka + propriétés AMQP).
-Prochain chantier logique : EXT-2 (ingestion PCAP hors-ligne, vérifiable
-macOS), CAP-7/8 (IPv6, dédup — nécessitent un hôte de capture Linux),
-OPS-10/TST-8 (durcissement CI — nécessitent un runner CI/kind),
-ou le démarrage de la **Phase 3** (gros
+**Backlog, lot 18 — EXT-2, ingestion PCAP hors-ligne :**
+
+- **EXT-2** : `k8shark worker --pcap-file <path>` rejoue un pcap
+  (tcpdump/ksniff) à travers les mêmes `route()`/dissecteurs que le live —
+  post-mortem d'un incident depuis un pcap client, debug de dissecteur sur
+  vrais octets, boucle de dev sans cluster ni mode démo. Nouvelle
+  `capture.NewFileSource` (`capture/pcap.go`) : `PacketSource` pure Go via
+  `gopacket/pcapgo` (ni cgo ni libpcap, donc fonctionne sur macOS,
+  contrairement à AF_PACKET), décodage lazy, canal fermé en fin de fichier
+  (que `captureLoop` gère déjà comme toute fin de source). Prioritaire sur
+  la capture live dans `worker.Run`, sans privilèges. Tests
+  `TestFileSourceReplaysPackets`, `TestFileSourceRejectsNonPcap`. Vérifié
+  en réel par un aller-retour : pcap exporté via `/api/pcap` (MCP-1)
+  ré-ingéré via `--pcap-file` → 10 entries reconstruites par le pipeline
+  (les ICMP se reconstruisent ; les flux TCP synthétiques de l'export
+  n'ont pas de handshake pour le réassemblage — propriété de la synthèse
+  MCP-1, pas d'EXT-2 ; la dissection TCP sur vrais paquets est couverte par
+  les tests unitaires qui empruntent le même chemin `route()`).
+
+Reste du backlog hors Phase 3 : **CAP-7/8** (IPv6, dédup paquets —
+nécessitent un hôte de capture Linux pour vérification réelle), **OPS-10**
+(e2e kind + scan images/provenance) et **TST-8** (nightly kind) — CI/kubes,
+non exerçables dans ce sandbox macOS ; **EXT-5** screenshots/GIF (nécessite
+navigateur/asciinema). Ces 4 restants sortent du périmètre vérifiable ici.
+Le thème sécurité (SEC-1 à SEC-9) est intégralement traité et **tous les
+dissecteurs L7 du backlog sont livrés** (DNS-TCP, WebSocket, MySQL, MongoDB,
+Kafka + propriétés AMQP).
+Prochain chantier logique : **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
 

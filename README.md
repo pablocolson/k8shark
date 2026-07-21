@@ -112,7 +112,8 @@ only), `--redis-ports` / `--valkey-ports` / `--amqp-ports` (extra ports for
 those protocols), `--capture-bodies` / `--body-bytes` / `--raw-bytes`
 (capture-depth bounds), `--redact-headers` (scrub credential-bearing HTTP
 headers, on by default), `--enable-tls` / `--proc-root` (eBPF TLS capture),
-`--hub-token` (hub auth).
+`--pcap-file` (replay a pcap file through the dissectors instead of live
+capture — offline analysis, works on any OS), `--hub-token` (hub auth).
 
 Hub flags of note: `--buffer` (in-memory entry ring size), `--api-token`
 (require a bearer token on `/api` and the WebSocket endpoints; also read from

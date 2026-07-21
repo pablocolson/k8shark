@@ -35,6 +35,7 @@ func workerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Iface, "iface", "", "capture interface (default: any)")
 	cmd.Flags().BoolVar(&opts.Demo, "demo", false, "generate synthetic traffic instead of capturing")
 	cmd.Flags().IntVar(&opts.DemoRPS, "demo-rps", 25, "synthetic entries per second in demo mode")
+	cmd.Flags().StringVar(&opts.PcapFile, "pcap-file", "", "replay a pcap file through the dissectors instead of capturing live (offline analysis; works on any OS)")
 	cmd.Flags().IntSliceVar(&opts.RedisPorts, "redis-ports", nil, "extra RESP ports labelled redis")
 	cmd.Flags().IntSliceVar(&opts.ValkeyPorts, "valkey-ports", nil, "RESP ports labelled valkey")
 	cmd.Flags().IntSliceVar(&opts.AMQPPorts, "amqp-ports", nil, "extra AMQP 0-9-1 ports (in addition to 5672)")
