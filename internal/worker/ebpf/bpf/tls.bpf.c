@@ -69,52 +69,69 @@ char __license[] SEC("license") = "GPL";
 #define DIR_WRITE 1
 #define DIR_READ 2
 #define AF_INET 2
+#define AF_INET6 10
+
+// in6_addr_blob is just a same-size stand-in for the kernel's real
+// `struct in6_addr` — CO-RE relocates skc_v6_daddr/skc_v6_rcv_saddr by field
+// name against the target's BTF, so the exact internal shape here doesn't
+// matter, only that BPF_CORE_READ_INTO's sizeof(*dst) come out to 16 bytes
+// (see record_tuple).
+struct in6_addr_blob {
+	__u8 b[16];
+};
 
 // Minimal CO-RE view of the kernel's struct sock, just the 4-tuple fields of
-// sock_common. preserve_access_index makes libbpf relocate the real field
-// offsets against the node's BTF at load time — so we read the tuple without
-// committing the arch-specific ~150k-line vmlinux.h (the reason the rest of
-// this file hand-defines its types). Field names must match the kernel's.
-// This is the ONLY CO-RE (BTF-relocated) read in the program; the SSL uprobes
-// touch only userspace memory and function args.
+// sock_common (IPv4 and IPv6). preserve_access_index makes libbpf relocate
+// the real field offsets against the node's BTF at load time — so we read the
+// tuple without committing the arch-specific ~150k-line vmlinux.h (the reason
+// the rest of this file hand-defines its types). Field names must match the
+// kernel's. This is the ONLY CO-RE (BTF-relocated) read in the program; the
+// SSL uprobes touch only userspace memory and function args.
 struct sock_common {
 	__be32 skc_daddr;      // remote IPv4 (network order)
 	__be32 skc_rcv_saddr;  // local IPv4 (network order)
 	__u16 skc_num;         // local port (host order)
 	__be16 skc_dport;      // remote port (network order)
 	short unsigned int skc_family;
+	struct in6_addr_blob skc_v6_daddr;     // remote IPv6
+	struct in6_addr_blob skc_v6_rcv_saddr; // local IPv6
 } __attribute__((preserve_access_index));
 
 struct sock {
 	struct sock_common __sk_common;
 } __attribute__((preserve_access_index));
 
-// conn_tuple is the resolved 4-tuple (IPv4) for a thread's current TCP socket.
+// conn_tuple is the resolved 4-tuple for a thread's current TCP socket, IPv4
+// or IPv6 (family tells the Go side which of the 16 addr bytes are
+// meaningful — 4 for AF_INET, all 16 for AF_INET6).
 struct conn_tuple {
-	__u32 saddr;  // network order
-	__u32 daddr;  // network order
-	__u16 sport;  // host order
-	__u16 dport;  // host order
+	__u8 saddr[16];  // network order
+	__u8 daddr[16];  // network order
+	__u16 sport;     // host order
+	__u16 dport;     // host order
+	__u8 family;     // 0 = unresolved, AF_INET or AF_INET6
 };
 
 // Field order matters: it is hand-decoded on the Go side (loader.go's
 // decodeEvent) without relying on bpf2go's -type codegen, so this must stay a
 // flat, unambiguous layout — every field naturally aligned with NO compiler-
 // inserted padding before data[] (u64 forces 8-byte struct alignment, hence
-// pid+tid packed first to fill that to 8, then data_len at a 4-aligned
-// offset, then two 1-byte fields needing no alignment at all). If you change
-// this struct, update decodeEvent's offsets to match.
+// pid+tid packed first to fill that to 8; saddr/daddr are 16-byte arrays so
+// need no extra alignment padding either side; data_len then lands on a
+// 4-aligned offset, followed by fields needing no alignment at all). If you
+// change this struct, update decodeEvent's offsets to match.
 struct event {
-	__u32 pid;       // offset 0
-	__u32 tid;       // offset 4
-	__u64 ssl_ctx;   // offset 8
-	__u32 saddr;     // offset 16 (network order; 0 if the 4-tuple is unknown)
-	__u32 daddr;     // offset 20
-	__u32 data_len;  // offset 24
-	__u16 sport;     // offset 28 (host order)
-	__u16 dport;     // offset 30
-	__u8 direction;  // offset 32
-	__u8 data[MAX_DATA]; // offset 33
+	__u32 pid;        // offset 0
+	__u32 tid;        // offset 4
+	__u64 ssl_ctx;    // offset 8
+	__u8 saddr[16];   // offset 16 (network order; first 4 bytes for IPv4, all zero if unknown)
+	__u8 daddr[16];   // offset 32
+	__u32 data_len;   // offset 48
+	__u16 sport;      // offset 52 (host order)
+	__u16 dport;      // offset 54
+	__u8 family;      // offset 56 (0 = unresolved, AF_INET or AF_INET6)
+	__u8 direction;   // offset 57
+	__u8 data[MAX_DATA]; // offset 58
 };
 
 // events is drained by loader.go's ringbuf.Reader into TLSRecord values.
@@ -159,19 +176,32 @@ struct {
 	__type(value, struct conn_tuple);
 } tuples SEC(".maps");
 
-// record_tuple reads the socket's IPv4 4-tuple via CO-RE and caches it for the
-// current thread. IPv6 is skipped (tuple stays 0 -> synthetic endpoint).
+// record_tuple reads the socket's 4-tuple via CO-RE and caches it for the
+// current thread, IPv4 or IPv6. An unrecognised family (neither) leaves the
+// thread's cached tuple untouched rather than overwriting it with a bogus
+// zero one.
 static __always_inline void record_tuple(struct sock *sk)
 {
 	if (!sk)
 		return;
 	short unsigned int family = 0;
 	BPF_CORE_READ_INTO(&family, sk, __sk_common.skc_family);
-	if (family != AF_INET)
-		return;
+
 	struct conn_tuple t = {};
-	BPF_CORE_READ_INTO(&t.saddr, sk, __sk_common.skc_rcv_saddr);
-	BPF_CORE_READ_INTO(&t.daddr, sk, __sk_common.skc_daddr);
+	if (family == AF_INET) {
+		__be32 addr = 0;
+		BPF_CORE_READ_INTO(&addr, sk, __sk_common.skc_rcv_saddr);
+		__builtin_memcpy(t.saddr, &addr, sizeof(addr));
+		BPF_CORE_READ_INTO(&addr, sk, __sk_common.skc_daddr);
+		__builtin_memcpy(t.daddr, &addr, sizeof(addr));
+		t.family = AF_INET;
+	} else if (family == AF_INET6) {
+		BPF_CORE_READ_INTO(&t.saddr, sk, __sk_common.skc_v6_rcv_saddr);
+		BPF_CORE_READ_INTO(&t.daddr, sk, __sk_common.skc_v6_daddr);
+		t.family = AF_INET6;
+	} else {
+		return;
+	}
 	BPF_CORE_READ_INTO(&t.sport, sk, __sk_common.skc_num); // already host order
 	__be16 dport = 0;
 	BPF_CORE_READ_INTO(&dport, sk, __sk_common.skc_dport);
@@ -197,19 +227,21 @@ static __always_inline void emit(__u64 ssl, __u8 dir, const void *buf, __u32 len
 	e->ssl_ctx = ssl;
 	e->direction = dir;
 
-	// Attach the thread's current 4-tuple if a kprobe resolved one (0 = unknown
-	// -> the Go side falls back to the synthetic pid:<n> endpoint).
+	// Attach the thread's current 4-tuple if a kprobe resolved one (family 0 =
+	// unknown -> the Go side falls back to the synthetic pid:<n> endpoint).
 	struct conn_tuple *t = bpf_map_lookup_elem(&tuples, &id);
 	if (t) {
-		e->saddr = t->saddr;
-		e->daddr = t->daddr;
+		__builtin_memcpy(e->saddr, t->saddr, sizeof(e->saddr));
+		__builtin_memcpy(e->daddr, t->daddr, sizeof(e->daddr));
 		e->sport = t->sport;
 		e->dport = t->dport;
+		e->family = t->family;
 	} else {
-		e->saddr = 0;
-		e->daddr = 0;
+		__builtin_memset(e->saddr, 0, sizeof(e->saddr));
+		__builtin_memset(e->daddr, 0, sizeof(e->daddr));
 		e->sport = 0;
 		e->dport = 0;
+		e->family = 0;
 	}
 
 	// Bound the copy length with an OPAQUE mask. A plain C `if (len > MAX_DATA)

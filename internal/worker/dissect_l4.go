@@ -50,6 +50,50 @@ type flowState struct {
 	// how much payload was actually seen, for the truncated flag.
 	rawBuf   []byte
 	rawTotal int
+
+	// Last payload-bearing segment seen per direction, for CAP-8 same-packet
+	// dedup (see dedupWindow) — AF_PACKET on the "any" interface can observe
+	// one physical packet more than once on a CNI-overlay node.
+	lastClientSeg, lastServerSeg segFingerprint
+}
+
+// dedupWindow bounds how recently a payload-bearing packet with the same
+// (direction, seq, len) must have been seen for a repeat to be treated as the
+// same wire packet observed via a second/third capture point rather than a
+// genuine retransmission (CAP-8). AF_PACKET on the "any" interface sees every
+// interface on the host, so on a CNI-overlay node the identical packet can be
+// delivered more than once — once per interface it crosses (the physical
+// NIC, the CNI's vxlan/overlay interface, the destination pod's veth). Those
+// deliveries are a kernel-internal, same-host hand-off, microseconds apart —
+// never a real network round trip. A genuine retransmit needs at least one:
+// Linux's minimum RTO is 200ms, and even a fast retransmit (triggered by
+// duplicate ACKs) needs several real network round trips for those ACKs to
+// reach the sender first. dedupWindow only has to separate "same host,
+// different interface" from "actually went out over the wire and back" — 5ms
+// is generous headroom over the former and nowhere near the latter on any
+// real network.
+const dedupWindow = 5 * time.Millisecond
+
+// segFingerprint identifies one payload-bearing TCP segment by its byte
+// range, to recognise the same packet arriving again via a different capture
+// point (see dedupWindow).
+type segFingerprint struct {
+	seq uint32
+	len int
+	at  time.Time
+}
+
+// seenRecently reports whether seq/len matches the last recorded fingerprint
+// within dedupWindow — and if not, records this packet as the new "last
+// seen". A detected duplicate leaves the recorded fingerprint untouched, so a
+// third delivery of the same packet still compares against the original
+// arrival instead of the second one.
+func (fp *segFingerprint) seenRecently(seq uint32, length int, ts time.Time) bool {
+	if !fp.at.IsZero() && fp.seq == seq && fp.len == length && ts.Sub(fp.at) < dedupWindow {
+		return true
+	}
+	*fp = segFingerprint{seq: seq, len: length, at: ts}
+	return false
 }
 
 // rawView renders the flow's sampled payload as a RawView, or nil if none
@@ -170,6 +214,35 @@ func (p *pipeline) trackTCP(netFlow, transport gopacket.Flow, tcp *layers.TCP, l
 		nf := newFlow(api.ProtocolTCP, netFlow, transport, ts)
 		f.src, f.dst, f.firstSeen = nf.src, nf.dst, ts
 	}
+
+	// Per-direction accounting. f.src is oriented client->server by newFlow, so
+	// a packet whose (netFlow.Src, transport.Src) equals f.src is client->server.
+	clientToServer := netFlow.Src().String() == f.src.IP && portOf(transport.Src().String()) == f.src.Port
+	payloadLen := len(tcp.Payload)
+
+	// CAP-8 dedup gate: a payload-bearing packet already seen on this
+	// connection/direction/seq/len within dedupWindow is the same wire
+	// packet delivered again via another host-local interface, not a
+	// retransmission — skip it before any counting (bytes/packets/raw
+	// sample/retransmit) double- or triple-counts it. Scoped to
+	// payload-bearing packets: a zero-payload ACK/SYN/FIN can legitimately
+	// repeat the same seq across genuinely distinct packets (e.g. a stalled
+	// sender's keep-alive ACKs, or back-to-back duplicate ACKs triggering a
+	// fast retransmit), so seq+len alone can't identify those as duplicates
+	// the way it safely can for a specific slice of the byte stream. The
+	// flow still counts as alive either way.
+	if payloadLen > 0 {
+		fp := &f.lastClientSeg
+		if !clientToServer {
+			fp = &f.lastServerSeg
+		}
+		if fp.seenRecently(tcp.Seq, payloadLen, ts) {
+			f.lastSeen = ts
+			p.flowMu.Unlock()
+			return
+		}
+	}
+
 	f.lastSeen = ts
 	f.packets++
 	f.bytes += int64(length)
@@ -186,10 +259,6 @@ func (p *pipeline) trackTCP(netFlow, transport gopacket.Flow, tcp *layers.TCP, l
 		f.headerHex = meta.headerHex
 	}
 
-	// Per-direction accounting. f.src is oriented client->server by newFlow, so
-	// a packet whose (netFlow.Src, transport.Src) equals f.src is client->server.
-	clientToServer := netFlow.Src().String() == f.src.IP && portOf(transport.Src().String()) == f.src.Port
-	payloadLen := len(tcp.Payload)
 	if clientToServer {
 		f.clientBytes += int64(length)
 		f.clientPackets++
@@ -316,9 +385,24 @@ func (p *pipeline) trackUDP(netFlow, transport gopacket.Flow, length int, ts tim
 	p.flowMu.Unlock()
 }
 
-// handleICMP emits one entry per ICMP packet (echo, unreachable, etc.).
+// handleICMP emits one entry per ICMPv4 packet (echo, unreachable, etc.).
 func (p *pipeline) handleICMP(netFlow gopacket.Flow, icmp *layers.ICMPv4, length int, ts time.Time) {
 	desc, status := icmpDesc(icmp.TypeCode)
+	p.emitICMPEntry(netFlow, icmp.Payload, length, ts, desc, status)
+}
+
+// handleICMPv6 mirrors handleICMP for ICMPv6 (echo, destination unreachable,
+// packet-too-big, neighbor discovery, ...) — route() couldn't dispatch these
+// at all before CAP-7, so dual-stack/IPv6-only clusters saw silence where a
+// v4 cluster would show a ping/unreachable entry.
+func (p *pipeline) handleICMPv6(netFlow gopacket.Flow, icmp *layers.ICMPv6, length int, ts time.Time) {
+	desc, status := icmp6Desc(icmp.TypeCode)
+	p.emitICMPEntry(netFlow, icmp.Payload, length, ts, desc, status)
+}
+
+// emitICMPEntry builds and emits the api.Entry shared by the ICMPv4/ICMPv6
+// handlers — everything but the type-code decoding is identical.
+func (p *pipeline) emitICMPEntry(netFlow gopacket.Flow, payload []byte, length int, ts time.Time, desc, status string) {
 	p.sink.emit(&api.Entry{
 		ID:          p.node + "-icmp-" + strconv.FormatUint(p.seq.Add(1), 36),
 		Protocol:    api.ProtocolICMP,
@@ -326,7 +410,7 @@ func (p *pipeline) handleICMP(netFlow gopacket.Flow, icmp *layers.ICMPv4, length
 		Node:        p.node,
 		Source:      api.Endpoint{IP: netFlow.Src().String()},
 		Destination: api.Endpoint{IP: netFlow.Dst().String()},
-		Request:     api.Payload{Summary: desc, Bytes: int64(length), Raw: rawViewFromBytes(icmp.Payload, p.rawCap)},
+		Request:     api.Payload{Summary: desc, Bytes: int64(length), Raw: rawViewFromBytes(payload, p.rawCap)},
 		Response:    api.Payload{Summary: desc},
 		Status:      status,
 	})
@@ -397,6 +481,21 @@ func icmpDesc(tc layers.ICMPv4TypeCode) (string, string) {
 	case layers.ICMPv4TypeDestinationUnreachable, layers.ICMPv4TypeTimeExceeded:
 		return tc.String(), "error"
 	case layers.ICMPv4TypeSourceQuench, layers.ICMPv4TypeRedirect:
+		return tc.String(), "warning"
+	default:
+		return tc.String(), "success"
+	}
+}
+
+// icmp6Desc mirrors icmpDesc for ICMPv6 (RFC 4443/4861): unreachable/
+// time-exceeded are errors, packet-too-big/redirect are warnings (same
+// severity intent as v4's source-quench/redirect), everything else — echo,
+// neighbor/router discovery, MLD — is informational.
+func icmp6Desc(tc layers.ICMPv6TypeCode) (string, string) {
+	switch tc.Type() {
+	case layers.ICMPv6TypeDestinationUnreachable, layers.ICMPv6TypeTimeExceeded:
+		return tc.String(), "error"
+	case layers.ICMPv6TypePacketTooBig, layers.ICMPv6TypeRedirect:
 		return tc.String(), "warning"
 	default:
 		return tc.String(), "success"

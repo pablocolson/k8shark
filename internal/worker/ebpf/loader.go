@@ -26,13 +26,21 @@ const (
 	eventOffPID       = 0
 	eventOffTID       = 4
 	eventOffSSLCtx    = 8
-	eventOffSAddr     = 16
-	eventOffDAddr     = 20
-	eventOffDataLen   = 24
-	eventOffSPort     = 28
-	eventOffDPort     = 30
-	eventOffDirection = 32
-	eventOffData      = 33
+	eventOffSAddr     = 16 // 16 bytes; only the first 4 are meaningful for AF_INET
+	eventOffDAddr     = 32
+	eventOffDataLen   = 48
+	eventOffSPort     = 52
+	eventOffDPort     = 54
+	eventOffFamily    = 56
+	eventOffDirection = 57
+	eventOffData      = 58
+)
+
+// Linux AF_* constants (bits/socket.h) — matches AF_INET/AF_INET6 in
+// bpf/tls.bpf.c's struct event.family.
+const (
+	afInet  = 2
+	afInet6 = 10
 )
 
 func decodeEvent(raw []byte) (TLSRecord, error) {
@@ -52,15 +60,26 @@ func decodeEvent(raw []byte) (TLSRecord, error) {
 		SrcPort:   binary.LittleEndian.Uint16(raw[eventOffSPort:]),
 		DstPort:   binary.LittleEndian.Uint16(raw[eventOffDPort:]),
 	}
-	// saddr/daddr are network-order IPv4 as the kernel stored them; a zero
-	// address means the tcp_sendmsg/tcp_recvmsg kprobe hasn't resolved this
-	// thread's socket yet (the Go side then keeps the synthetic pid:<n>
-	// endpoint).
-	if sa := binary.BigEndian.Uint32(raw[eventOffSAddr : eventOffSAddr+4]); sa != 0 {
-		rec.SrcIP = ipv4String(raw[eventOffSAddr : eventOffSAddr+4])
-	}
-	if da := binary.BigEndian.Uint32(raw[eventOffDAddr : eventOffDAddr+4]); da != 0 {
-		rec.DstIP = ipv4String(raw[eventOffDAddr : eventOffDAddr+4])
+	// saddr/daddr are network-order addresses as the kernel stored them (4
+	// bytes for AF_INET, all 16 for AF_INET6); an all-zero address, or an
+	// unrecognised family (0 = the tcp_sendmsg/tcp_recvmsg kprobe hasn't
+	// resolved this thread's socket yet), means the Go side keeps the
+	// synthetic pid:<n> endpoint instead.
+	switch raw[eventOffFamily] {
+	case afInet:
+		if sa := raw[eventOffSAddr : eventOffSAddr+4]; !isZero(sa) {
+			rec.SrcIP = ipv4String(sa)
+		}
+		if da := raw[eventOffDAddr : eventOffDAddr+4]; !isZero(da) {
+			rec.DstIP = ipv4String(da)
+		}
+	case afInet6:
+		if sa := raw[eventOffSAddr : eventOffSAddr+16]; !isZero(sa) {
+			rec.SrcIP = ipv6String(sa)
+		}
+		if da := raw[eventOffDAddr : eventOffDAddr+16]; !isZero(da) {
+			rec.DstIP = ipv6String(da)
+		}
 	}
 	if end > eventOffData {
 		rec.Data = append([]byte(nil), raw[eventOffData:end]...)
@@ -71,6 +90,21 @@ func decodeEvent(raw []byte) (TLSRecord, error) {
 // ipv4String formats 4 network-order bytes as a dotted-quad.
 func ipv4String(b []byte) string {
 	return net.IP(b[:4]).To4().String()
+}
+
+// ipv6String formats 16 network-order bytes as a canonical IPv6 address.
+func ipv6String(b []byte) string {
+	return net.IP(b[:16]).String()
+}
+
+// isZero reports whether every byte is 0 (the sentinel for "unresolved").
+func isZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // probeNames maps our stable program-name strings (used by attach.go's

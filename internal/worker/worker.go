@@ -327,6 +327,11 @@ func (p *pipeline) route(assembler *tcpassembly.Assembler, pkt gopacket.Packet) 
 	if il := pkt.Layer(layers.LayerTypeICMPv4); il != nil {
 		icmp, _ := il.(*layers.ICMPv4)
 		p.handleICMP(net.NetworkFlow(), icmp, length, ts)
+		return
+	}
+	if il := pkt.Layer(layers.LayerTypeICMPv6); il != nil {
+		icmp, _ := il.(*layers.ICMPv6)
+		p.handleICMPv6(net.NetworkFlow(), icmp, length, ts)
 	}
 }
 
