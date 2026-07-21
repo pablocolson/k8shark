@@ -660,11 +660,40 @@ marshals :**
   dans `/api/fields`. `make lint`/`go test -race ./...` (0 échec)/`vitest`
   (105)/`build` propres.
 
-Reste du backlog hors Phase 3 : CAP-7/8, DIS-8,
-OPS-10, TST-8, EXT-2 (EXT-5 fait sauf screenshots/GIF).
+**Backlog, lot 17 — DIS-8, dissecteur Kafka :**
+
+- **DIS-8** : 9092 admis dans `capturePorts` (kernel BPF), dispatch
+  `consumeKafkaID` dans `consumeStreamID`. `dissect_kafka.go` : cadre
+  taille 4 octets, en-tête requête (api_key int16, api_version int16,
+  correlation_id int32, client_id nullable string) et réponse
+  (size + correlation_id + body), **appariement exact par correlation_id**
+  (map par connexion, pas de FIFO) — plus robuste que Postgres/MySQL.
+  MVP sur les api_keys à forte valeur : Produce (0), Fetch (1),
+  Metadata (3), ApiVersions (18) — surface le nom d'api_key, la version,
+  le(s) topic(s) quand parsable et l'error_code. Versions « flexibles »
+  (tagged fields/compact strings, ~v9+ Produce/Fetch) : décodage
+  best-effort des versions courantes, skip propre (api_key/version quand
+  même surfacés, pas de deep-parse) au lieu de misparser ; allocations
+  bornées, aucune panique sur troncature. Contrat `ProtocolKafka` +
+  `KafkaDetail` additif (champs `APIKey`/`APIVersion` — initialismes Go
+  idiomatiques, tags json `apiKey`/`apiVersion`). Filtres `kafka.topic` /
+  `kafka.apikey`, couleur UI, démo dissectée. Tests
+  `TestKafkaProducePairing`, `TestKafkaOutOfOrderCorrelation` (réponses
+  inversées appariées par id), `TestKafkaTruncatedNoPanic`,
+  `TestKafkaFlexibleVersionSurfaced`, `TestCompileFilterKafka`.
+  Implémenté par sous-agent, finalisé inline (2 findings staticcheck
+  initialismes corrigés). Vérifié en réel : kafka dissecté en démo
+  (`apiKey=Metadata`), champs dans `/api/fields`. `make lint`/`go test
+  -race ./...` (0 échec)/`vitest` (105)/`build` propres.
+
+Reste du backlog hors Phase 3 : CAP-7/8, OPS-10, TST-8, EXT-2
+(EXT-5 fait sauf screenshots/GIF).
 Le thème sécurité (SEC-1 à SEC-9) est intégralement traité.
-Prochain chantier logique : DIS-8 (dissecteur Kafka), EXT-2 (ingestion PCAP
-hors-ligne), OPS-10/TST-8 (durcissement CI),
+Tous les dissecteurs L7 du backlog sont désormais livrés (DNS-TCP, WebSocket,
+MySQL, MongoDB, Kafka + propriétés AMQP).
+Prochain chantier logique : EXT-2 (ingestion PCAP hors-ligne, vérifiable
+macOS), CAP-7/8 (IPv6, dédup — nécessitent un hôte de capture Linux),
+OPS-10/TST-8 (durcissement CI — nécessitent un runner CI/kind),
 ou le démarrage de la **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).

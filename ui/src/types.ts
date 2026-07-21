@@ -8,6 +8,7 @@ export type Protocol =
   | "postgres"
   | "mysql"
   | "mongodb"
+  | "kafka"
   | "amqp"
   | "ws"
   | "tcp"
@@ -138,6 +139,15 @@ export interface MongoDetail {
   errmsg?: string;
 }
 
+export interface KafkaDetail {
+  apiKey?: string;
+  apiVersion?: number;
+  topic?: string;
+  clientId?: string;
+  errorCode?: number;
+  correlationId?: number;
+}
+
 export interface Payload {
   summary?: string;
   headers?: Record<string, string>;
@@ -174,6 +184,7 @@ export interface Payload {
   postgres?: PGDetail;
   mysql?: MySQLDetail;
   mongo?: MongoDetail;
+  kafka?: KafkaDetail;
 }
 
 export interface Entry {

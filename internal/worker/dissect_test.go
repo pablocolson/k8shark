@@ -1819,3 +1819,198 @@ func TestMongoTruncatedNoPanic(t *testing.T) {
 		t.Errorf("got %d entries from garbled MongoDB, want 0", len(got))
 	}
 }
+
+// --- DIS-8: Kafka -----------------------------------------------------------
+
+// kafkaFrame prepends the 4-byte big-endian size prefix Kafka frames every
+// request/response with. kafkaString appends a Kafka STRING (INT16 length +
+// bytes). Kafka is big-endian, so appendU16/appendU32 (not the *LE helpers).
+func kafkaFrame(payload []byte) []byte {
+	return append(appendU32(nil, uint32(len(payload))), payload...)
+}
+func kafkaString(b []byte, s string) []byte {
+	b = appendU16(b, uint16(len(s)))
+	return append(b, s...)
+}
+
+// kafkaReqHeaderBytes builds a request header: api_key, api_version,
+// correlation_id, client_id (nullable string, always present here).
+func kafkaReqHeaderBytes(apiKey, apiVersion int16, corrID int32, clientID string) []byte {
+	b := appendU16(nil, uint16(apiKey))
+	b = appendU16(b, uint16(apiVersion))
+	b = appendU32(b, uint32(corrID))
+	return kafkaString(b, clientID)
+}
+
+// kafkaProduceReqBody builds a non-flexible (v3-v8) Produce request body up to
+// the first topic name (the dissector reads no further).
+func kafkaProduceReqBody(topic string) []byte {
+	b := appendU16(nil, 0xffff)  // transactional_id = null (v3+)
+	b = appendU16(b, 1)          // acks
+	b = appendU32(b, 30000)      // timeout_ms
+	b = appendU32(b, 1)          // topics count
+	return kafkaString(b, topic) // first topic name
+}
+
+// kafkaProduceRespPayload builds a non-flexible Produce response payload
+// (response header v0 = just correlation_id, then the body up to the first
+// partition's error_code).
+func kafkaProduceRespPayload(corrID int32, topic string, errCode int16) []byte {
+	b := appendU32(nil, uint32(corrID)) // response header: correlation_id
+	b = appendU32(b, 1)                 // responses count
+	b = kafkaString(b, topic)           // topic name
+	b = appendU32(b, 1)                 // partition_responses count
+	b = appendU32(b, 0)                 // partition index
+	return appendU16(b, uint16(errCode))
+}
+
+// A Produce request pairs with its response by correlation_id, surfacing the
+// api_key name, version, topic and client id.
+func TestKafkaProducePairing(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40600, kafkaPort)
+
+	req := kafkaFrame(append(kafkaReqHeaderBytes(0, 7, 42, "producer-1"), kafkaProduceReqBody("orders")...))
+	resp := kafkaFrame(kafkaProduceRespPayload(42, "orders", 0))
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+	p.consumeStream(sNet, sTr, strings.NewReader(string(resp)))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	e := got[0]
+	if e.Protocol != api.ProtocolKafka {
+		t.Fatalf("protocol = %q, want kafka", e.Protocol)
+	}
+	k := e.Request.Kafka
+	if k == nil {
+		t.Fatalf("no request Kafka detail: %+v", e.Request)
+	}
+	if k.APIKey != "Produce" || k.APIVersion != 7 || k.Topic != "orders" {
+		t.Errorf("request kafka = %+v, want Produce/v7/orders", k)
+	}
+	if k.CorrelationID != 42 {
+		t.Errorf("correlation id = %d, want 42", k.CorrelationID)
+	}
+	if k.ClientID != "producer-1" {
+		t.Errorf("client id = %q, want producer-1", k.ClientID)
+	}
+	if e.Request.Summary != "PRODUCE topic=orders (v7)" {
+		t.Errorf("summary = %q", e.Request.Summary)
+	}
+	if e.Status != "success" {
+		t.Errorf("status = %q, want success", e.Status)
+	}
+}
+
+// Two requests on one connection whose responses arrive in the opposite order
+// still pair correctly, because pairing is by correlation_id (not FIFO). The
+// swapped Produce response also carries an error_code, exercising the response
+// error path.
+func TestKafkaOutOfOrderCorrelation(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40601, kafkaPort)
+
+	// Metadata(corr=1, topic=events) then Produce(corr=2, topic=orders).
+	metaBody := kafkaString(appendU32(nil, 1), "events") // topics count=1 + name
+	var req []byte
+	req = append(req, kafkaFrame(append(kafkaReqHeaderBytes(3, 8, 1, "c"), metaBody...))...)
+	req = append(req, kafkaFrame(append(kafkaReqHeaderBytes(0, 7, 2, "c"), kafkaProduceReqBody("orders")...))...)
+
+	// Responses swapped: Produce (corr=2, error 3) first, then Metadata (corr=1).
+	metaResp := appendU32(appendU32(nil, 1), 0) // correlation_id=1 + a body we don't parse
+	var resp []byte
+	resp = append(resp, kafkaFrame(kafkaProduceRespPayload(2, "orders", 3))...)
+	resp = append(resp, kafkaFrame(metaResp)...)
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+	p.consumeStream(sNet, sTr, strings.NewReader(string(resp)))
+
+	got := drain(s)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	byTopic := map[string]*api.Entry{}
+	for _, e := range got {
+		if e.Request.Kafka == nil {
+			t.Fatalf("entry has no request Kafka detail: %+v", e.Request)
+		}
+		byTopic[e.Request.Kafka.Topic] = e
+	}
+	meta := byTopic["events"]
+	if meta == nil || meta.Request.Kafka.APIKey != "Metadata" || meta.Request.Kafka.CorrelationID != 1 {
+		t.Fatalf("metadata entry = %+v", meta)
+	}
+	prod := byTopic["orders"]
+	if prod == nil || prod.Request.Kafka.APIKey != "Produce" || prod.Request.Kafka.CorrelationID != 2 {
+		t.Fatalf("produce entry = %+v", prod)
+	}
+	if prod.Status != "error" || prod.Response.Kafka == nil || prod.Response.Kafka.ErrorCode != 3 {
+		t.Errorf("produce error = status %q resp %+v", prod.Status, prod.Response.Kafka)
+	}
+}
+
+// Truncated / garbled Kafka streams (short size prefix, negative/oversized size,
+// truncated body) must not panic and must emit nothing.
+func TestKafkaTruncatedNoPanic(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40602, kafkaPort)
+
+	streams := [][]byte{
+		{0x00, 0x00},                                                // can't read the 4-byte size
+		{0x00, 0x00, 0x00, 0x10, 0x00, 0x03},                        // size claims 16, only 2 present
+		{0xff, 0xff, 0xff, 0xff, 0x00},                              // negative size
+		{0x00, 0x00, 0x00, 0x02, 0x00},                              // size=2, only 1 byte present
+		kafkaFrame([]byte{0x00, 0x00, 0x00}),                        // valid frame, payload too short for a header
+		kafkaFrame(append(kafkaReqHeaderBytes(0, 7, 5, "c"), 0xff)), // header ok, body truncated
+	}
+	for _, stream := range streams {
+		p.consumeStream(rNet, rTr, bytes.NewReader(stream)) // request side
+		p.consumeStream(sNet, sTr, bytes.NewReader(stream)) // response side
+	}
+	if got := drain(s); len(got) != 0 {
+		t.Errorf("got %d entries from garbled Kafka, want 0", len(got))
+	}
+}
+
+// A flexible-version request (Produce v9) is still paired and surfaces its
+// api_key/version/client_id, but its compact-encoded body is NOT deep-parsed for
+// a topic — and neither side panics.
+func TestKafkaFlexibleVersionSurfaced(t *testing.T) {
+	s := newSink("", "", "n", discardLogger())
+	p := newPipeline(s, "n", discardLogger())
+	rNet, rTr, sNet, sTr := flows(40603, kafkaPort)
+
+	// Header fields stay fixed-position (incl. the non-compact client_id); the
+	// trailing bytes stand in for tagged fields + compact body.
+	req := kafkaFrame(append(kafkaReqHeaderBytes(0, 9, 7, "producer"), 0x00, 0x0a, 0x03, 0x01))
+	// Flexible response header: correlation_id + tagged fields + compact body,
+	// none of which we touch beyond the correlation_id.
+	resp := kafkaFrame(append(appendU32(nil, 7), 0x00, 0x00, 0x01))
+
+	p.consumeStream(rNet, rTr, strings.NewReader(string(req)))
+	p.consumeStream(sNet, sTr, strings.NewReader(string(resp)))
+
+	got := drain(s)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	k := got[0].Request.Kafka
+	if k == nil || k.APIKey != "Produce" || k.APIVersion != 9 {
+		t.Fatalf("request kafka = %+v, want Produce/v9", k)
+	}
+	if k.Topic != "" {
+		t.Errorf("topic = %q, want empty (flexible version must not be deep-parsed)", k.Topic)
+	}
+	if k.ClientID != "producer" {
+		t.Errorf("client id = %q, want producer", k.ClientID)
+	}
+	if got[0].Status != "success" {
+		t.Errorf("status = %q, want success", got[0].Status)
+	}
+}

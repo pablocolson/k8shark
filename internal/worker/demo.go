@@ -78,6 +78,17 @@ var mongoOpsDemo = []struct{ command, collection string }{
 	{"aggregate", "products"},
 	{"delete", "sessions"},
 }
+var kafkaOpsDemo = []struct {
+	apiKey     string
+	apiVersion int
+	topic      string
+}{
+	{"Produce", 9, "orders"},
+	{"Fetch", 12, "orders"},
+	{"Produce", 9, "payments"},
+	{"Metadata", 9, ""},
+	{"ApiVersions", 3, ""},
+}
 
 // runDemo emits synthetic entries to the sink at roughly rps until stopped.
 func runDemo(s *sink, node string, rps int, stop <-chan struct{}) {
@@ -202,6 +213,8 @@ func genEntry(rnd *rand.Rand, node string, seq int64) *api.Entry {
 		genMySQL(rnd, e)
 	case 7: // MongoDB
 		genMongo(rnd, e)
+	case 8: // Kafka
+		genKafka(rnd, e)
 	case 5: // AMQP (RabbitMQ 0-9-1)
 		op := amqpOps[rnd.Intn(len(amqpOps))]
 		e.Protocol = api.ProtocolAMQP
@@ -403,10 +416,9 @@ var l4Targets = []struct {
 	port         int
 	proto        api.Protocol
 }{
-	// mysql (3306) and mongodb (27017) are now emitted as dissected
-	// ProtocolMySQL/ProtocolMongo entries (see genMySQL/genMongo); kafka stays a
-	// generic flow until DIS-8.
-	{"kafka", "platform", "10.0.2.31", 9092, api.ProtocolTCP},
+	// mysql (3306), mongodb (27017) and kafka (9092) are now emitted as dissected
+	// ProtocolMySQL/ProtocolMongo/ProtocolKafka entries (see genMySQL/genMongo/
+	// genKafka) rather than generic flows.
 	{"gateway", "platform", "10.0.2.1", 443, api.ProtocolTCP},
 	{"statsd", "platform", "10.0.2.33", 8125, api.ProtocolUDP},
 	{"ntp", "kube-system", "10.0.0.5", 123, api.ProtocolUDP},
@@ -490,6 +502,29 @@ func genMongo(rnd *rand.Rand, e *api.Entry) {
 		return
 	}
 	e.Response = api.Payload{Summary: "ok", Mongo: &api.MongoDetail{OK: true}}
+	e.Status, e.StatusCode = "success", 0
+}
+
+// genKafka fills e with a synthetic Kafka request/response interaction (DIS-8).
+func genKafka(rnd *rand.Rand, e *api.Entry) {
+	op := kafkaOpsDemo[rnd.Intn(len(kafkaOpsDemo))]
+	corrID := int32(rnd.Intn(1 << 20))
+	e.Protocol = api.ProtocolKafka
+	e.Destination = api.Endpoint{IP: "10.0.2.31", Port: 9092, Name: "kafka", Namespace: "platform"}
+	e.Request = api.Payload{
+		Summary: kafkaSummary(op.apiKey, op.apiVersion, op.topic),
+		Kafka: &api.KafkaDetail{
+			APIKey: op.apiKey, APIVersion: op.apiVersion, Topic: op.topic,
+			ClientID: "demo-producer", CorrelationID: corrID,
+		},
+	}
+	if rnd.Intn(20) == 0 {
+		// UNKNOWN_TOPIC_OR_PARTITION (3)
+		e.Response = api.Payload{Summary: "error 3", Kafka: &api.KafkaDetail{ErrorCode: 3}}
+		e.Status, e.StatusCode = "error", 0
+		return
+	}
+	e.Response = api.Payload{Summary: "ok"}
 	e.Status, e.StatusCode = "success", 0
 }
 

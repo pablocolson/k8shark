@@ -604,6 +604,22 @@ func fieldGetter(field string) func(*api.Entry) string {
 			}
 			return ""
 		}
+
+	// --- Kafka (DIS-8) ----------------------------------------------------
+	case "kafka.topic":
+		return func(e *api.Entry) string {
+			if e.Request.Kafka != nil {
+				return e.Request.Kafka.Topic
+			}
+			return ""
+		}
+	case "kafka.apikey":
+		return func(e *api.Entry) string {
+			if e.Request.Kafka != nil {
+				return e.Request.Kafka.APIKey
+			}
+			return ""
+		}
 	case "l4.ttl":
 		return func(e *api.Entry) string { return l4Int(e, func(l *api.L4Info) int { return l.TTL }) }
 	case "l4.retransmits":
@@ -841,6 +857,10 @@ func fulltext(e *api.Entry) string {
 	if e.L4 != nil && e.L4.TLS != nil && e.L4.TLS.SNI != "" {
 		sb.WriteByte(' ')
 		sb.WriteString(e.L4.TLS.SNI)
+	}
+	if e.Request.Kafka != nil && e.Request.Kafka.Topic != "" {
+		sb.WriteByte(' ')
+		sb.WriteString(e.Request.Kafka.Topic)
 	}
 	return strings.ToLower(sb.String())
 }

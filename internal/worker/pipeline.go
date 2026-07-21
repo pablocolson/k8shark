@@ -33,6 +33,7 @@ const (
 	dnsPort   = 53
 	mysqlPort = 3306
 	mongoPort = 27017
+	kafkaPort = 9092
 )
 
 // pipeline turns reassembled TCP streams and UDP datagrams into paired L7
@@ -50,6 +51,7 @@ type pipeline struct {
 	conns map[string]*connState    // request/response pairing, keyed by canonical conn
 	dns   map[string]*dnsPending   // DNS query pairing, keyed by client+message-id
 	mongo map[string]*mongoPending // MongoDB pairing, keyed by conn+requestID (see dissect_mongo.go)
+	kafka map[string]*kafkaPending // Kafka pairing, keyed by conn+correlationID (see dissect_kafka.go)
 
 	redisDB map[string]*redisDBState // per-connection Redis DB index (tracked from SELECT n), guarded by mu
 
@@ -95,6 +97,7 @@ func newPipeline(s *sink, node string, log *slog.Logger) *pipeline {
 		conns:         map[string]*connState{},
 		dns:           map[string]*dnsPending{},
 		mongo:         map[string]*mongoPending{},
+		kafka:         map[string]*kafkaPending{},
 		redisDB:       map[string]*redisDBState{},
 		flows:         map[string]*flowState{},
 		respPorts:     map[int]api.Protocol{redisPort: api.ProtocolRedis},
@@ -404,6 +407,8 @@ func (p *pipeline) consumeStreamID(c connID, r io.Reader) {
 		p.consumeMySQLID(c, r, dst == mysqlPort)
 	case dst == mongoPort || src == mongoPort:
 		p.consumeMongoID(c, r, dst == mongoPort)
+	case dst == kafkaPort || src == kafkaPort:
+		p.consumeKafkaID(c, r, dst == kafkaPort)
 	case dst == dnsPort || src == dnsPort:
 		p.consumeDNSTCPID(c, r, dst == dnsPort)
 	default:
@@ -917,6 +922,11 @@ func (p *pipeline) gc() {
 	for k, m := range p.mongo {
 		if m.ts.Before(cutoff) {
 			delete(p.mongo, k)
+		}
+	}
+	for k, m := range p.kafka {
+		if m.ts.Before(cutoff) {
+			delete(p.kafka, k)
 		}
 	}
 	for k, cs := range p.conns {

@@ -6,6 +6,7 @@ export const PROTO_COLORS: Record<string, string> = {
   postgres: "#22c3dd",
   mysql: "#d6608a",
   mongodb: "#2ecc71",
+  kafka: "#7048e8",
   amqp: "#ff8c42",
   ws: "#e6c84f",
   tcp: "#7a8699",

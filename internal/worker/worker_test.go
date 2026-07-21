@@ -8,7 +8,7 @@ import "testing"
 // dispatch after the kernel has already let the packet through.
 func TestCapturePortsDefaults(t *testing.T) {
 	got := capturePorts(Options{})
-	wantTCP := map[int]bool{80: true, 8080: true, redisPort: true, pgPort: true, amqpPort: true, dnsPort: true, mysqlPort: true, mongoPort: true}
+	wantTCP := map[int]bool{80: true, 8080: true, redisPort: true, pgPort: true, amqpPort: true, dnsPort: true, mysqlPort: true, mongoPort: true, kafkaPort: true}
 	if len(got.TCP) != len(wantTCP) {
 		t.Fatalf("TCP ports = %v, want the %d defaults", got.TCP, len(wantTCP))
 	}
@@ -31,7 +31,7 @@ func TestCapturePortsMergesOperatorOverrides(t *testing.T) {
 	})
 	want := map[int]bool{
 		80: true, 8080: true, redisPort: true, pgPort: true, amqpPort: true, dnsPort: true,
-		mysqlPort: true, mongoPort: true,
+		mysqlPort: true, mongoPort: true, kafkaPort: true,
 		7000: true, 7001: true, 5673: true, 3000: true,
 	}
 	if len(got.TCP) != len(want) {

@@ -54,7 +54,7 @@ var (
 // duplicated accessors here.
 var fieldCatalog = []FieldSpec{
 	{Name: "protocol", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
-		EnumValues: []string{"http", "dns", "redis", "valkey", "postgres", "mysql", "mongodb", "tcp", "udp", "icmp", "amqp", "ws"}},
+		EnumValues: []string{"http", "dns", "redis", "valkey", "postgres", "mysql", "mongodb", "kafka", "tcp", "udp", "icmp", "amqp", "ws"}},
 	{Name: "status", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true,
 		EnumValues: []string{"success", "warning", "error"}},
 	{Name: "node", Type: FieldTypeString, Operators: opsString, TrackValues: true},
@@ -108,6 +108,11 @@ var fieldCatalog = []FieldSpec{
 	{Name: "mysql.error", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: true},
 	{Name: "mongo.collection", Type: FieldTypeString, Operators: opsString, TrackValues: true},
 	{Name: "mongo.command", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true},
+
+	// Kafka (DIS-8). Topic is a discrete-ish string set; api_key is a small
+	// closed domain (Produce/Fetch/Metadata/...), so both are value-tracked.
+	{Name: "kafka.topic", Type: FieldTypeString, Operators: opsString, TrackValues: true},
+	{Name: "kafka.apikey", Type: FieldTypeEnum, Operators: opsEnum, TrackValues: true},
 	{Name: "l4.ttl", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: true},
 	{Name: "l4.retransmits", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},
 	{Name: "l4.window", Type: FieldTypeNumber, Operators: opsNumber, TrackValues: false},

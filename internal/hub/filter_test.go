@@ -285,6 +285,49 @@ func TestCompileFilterMongoAndMySQL(t *testing.T) {
 	}
 }
 
+// kafka.topic / kafka.apikey resolve against the request-side KafkaDetail
+// extracted from the request header/body (DIS-8).
+func TestCompileFilterKafka(t *testing.T) {
+	e := &api.Entry{
+		Protocol: api.ProtocolKafka,
+		Status:   "success",
+		Request: api.Payload{
+			Summary: "PRODUCE topic=orders (v9)",
+			Kafka:   &api.KafkaDetail{APIKey: "Produce", APIVersion: 9, Topic: "orders", ClientID: "producer-1", CorrelationID: 42},
+		},
+	}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`protocol == "kafka"`, true},
+		{`kafka.topic == "orders"`, true},
+		{`kafka.topic == "payments"`, false},
+		{`kafka.topic contains "ord"`, true},
+		{`kafka.apikey == "Produce"`, true},
+		{`kafka.apikey == "produce"`, true}, // case-insensitive
+		{`kafka.apikey == "Fetch"`, false},
+		{`protocol == "kafka" and kafka.topic == "orders"`, true},
+		{"orders", true}, // full-text via topic/summary
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+
+	// kafka.topic is empty (never matches) on a non-Kafka entry.
+	pred, _ := CompileFilter(`kafka.topic == "orders"`)
+	if pred(&api.Entry{Protocol: api.ProtocolHTTP}) {
+		t.Error("kafka.topic matched a non-Kafka entry")
+	}
+}
+
 // ws.opcode resolves against a post-101 WebSocket frame entry (DIS-6).
 func TestCompileFilterWebSocket(t *testing.T) {
 	e := &api.Entry{

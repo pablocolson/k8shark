@@ -16,6 +16,7 @@ const (
 	ProtocolPostgres Protocol = "postgres"
 	ProtocolMySQL    Protocol = "mysql"   // MySQL / MariaDB client-server protocol
 	ProtocolMongo    Protocol = "mongodb" // MongoDB wire protocol (label matches wellKnownPorts)
+	ProtocolKafka    Protocol = "kafka"   // Kafka wire protocol (label matches wellKnownPorts)
 	ProtocolAMQP     Protocol = "amqp"    // RabbitMQ / AMQP 0-9-1
 	ProtocolWS       Protocol = "ws"      // WebSocket frames after an HTTP 101 Upgrade (RFC 6455)
 	ProtocolTCP      Protocol = "tcp"     // generic L4 flow (undissected TCP)
@@ -101,6 +102,7 @@ type Payload struct {
 	Postgres    *PGDetail    `json:"postgres,omitempty"`
 	MySQL       *MySQLDetail `json:"mysql,omitempty"`
 	Mongo       *MongoDetail `json:"mongo,omitempty"`
+	Kafka       *KafkaDetail `json:"kafka,omitempty"`
 }
 
 // L4Info is connection-level L2/L3/L4 metadata, captured from the packet
@@ -239,6 +241,19 @@ type MongoDetail struct {
 	Database   string `json:"database,omitempty"`   // $db
 	OK         bool   `json:"ok,omitempty"`         // response ok:1 (false on error/ok:0)
 	ErrMsg     string `json:"errmsg,omitempty"`     // response error message
+}
+
+// KafkaDetail is the rich Kafka request/response extras (DIS-8). The api_key
+// name + api_version + client_id + topic are extracted from the request header
+// and body; error_code from the response body where cheaply parseable. Requests
+// and responses are paired exactly by CorrelationID (not FIFO).
+type KafkaDetail struct {
+	APIKey        string `json:"apiKey,omitempty"`        // request api_key name ("Produce"|"Fetch"|"Metadata"|"ApiVersions"|...) — filter field kafka.apikey
+	APIVersion    int    `json:"apiVersion,omitempty"`    // request api_version
+	Topic         string `json:"topic,omitempty"`         // first topic name for Produce/Fetch/Metadata on non-flexible versions — filter field kafka.topic
+	ClientID      string `json:"clientId,omitempty"`      // request header client_id
+	ErrorCode     int    `json:"errorCode,omitempty"`     // response error_code where surfaced (0 = none)
+	CorrelationID int32  `json:"correlationId,omitempty"` // request/response correlation id used for pairing
 }
 
 // Entry is a single captured L7 interaction. It is the atomic unit streamed

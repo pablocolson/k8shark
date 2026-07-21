@@ -247,7 +247,7 @@ var defaultHTTPPorts = []int{80, 8080}
 func capturePorts(opts Options) capture.Ports {
 	tcp := map[int]bool{
 		redisPort: true, pgPort: true, amqpPort: true, dnsPort: true,
-		mysqlPort: true, mongoPort: true,
+		mysqlPort: true, mongoPort: true, kafkaPort: true,
 	}
 	for _, p := range defaultHTTPPorts {
 		tcp[p] = true

@@ -253,6 +253,12 @@ function OverviewTab({ entry }: { entry: Entry }) {
     push(rows, "database", rq.mongo?.database);
     push(rows, "ok", rs.mongo?.ok ? "yes" : undefined);
     push(rows, "error", rs.mongo?.errmsg);
+  } else if (proto === "kafka") {
+    push(rows, "api", rq.kafka?.apiKey);
+    push(rows, "version", rq.kafka?.apiVersion);
+    push(rows, "topic", rq.kafka?.topic);
+    push(rows, "client id", rq.kafka?.clientId);
+    push(rows, "error code", rs.kafka?.errorCode);
   } else if (proto === "amqp") {
     push(rows, "class", rq.class);
     push(rows, "method", rq.method);
@@ -333,6 +339,16 @@ function MessageTab({
     } else {
       push(rows, "ok", p.mongo?.ok ? "yes" : undefined);
       push(rows, "error", p.mongo?.errmsg);
+    }
+  } else if (protocol === "kafka") {
+    if (side === "request") {
+      push(rows, "api", p.kafka?.apiKey);
+      push(rows, "version", p.kafka?.apiVersion);
+      push(rows, "topic", p.kafka?.topic);
+      push(rows, "client id", p.kafka?.clientId);
+      push(rows, "correlation id", p.kafka?.correlationId);
+    } else {
+      push(rows, "error code", p.kafka?.errorCode);
     }
   } else if (protocol === "dns" && side === "response") {
     push(rows, "rcode", p.dns?.rcode);
