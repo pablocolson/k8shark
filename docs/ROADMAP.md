@@ -705,14 +705,103 @@ marshals :**
   MCP-1, pas d'EXT-2 ; la dissection TCP sur vrais paquets est couverte par
   les tests unitaires qui empruntent le même chemin `route()`).
 
-Reste du backlog hors Phase 3 : **CAP-7/8** (IPv6, dédup paquets —
-nécessitent un hôte de capture Linux pour vérification réelle), **OPS-10**
-(e2e kind + scan images/provenance) et **TST-8** (nightly kind) — CI/kubes,
-non exerçables dans ce sandbox macOS ; **EXT-5** screenshots/GIF (nécessite
-navigateur/asciinema). Ces 4 restants sortent du périmètre vérifiable ici.
-Le thème sécurité (SEC-1 à SEC-9) est intégralement traité et **tous les
-dissecteurs L7 du backlog sont livrés** (DNS-TCP, WebSocket, MySQL, MongoDB,
-Kafka + propriétés AMQP).
+**Backlog, lot 19 — CAP-7, CAP-8, OPS-10, TST-8 (sandbox Linux réel) :**
+
+- **CAP-7** : les trois trous IPv6 traités. (1) `route()` (worker.go)
+  dispatche désormais `layers.LayerTypeICMPv6` vers un nouveau
+  `handleICMPv6`/`icmp6Desc` (miroir de l'ICMPv4 existant, sévérité
+  RFC 4443 : unreachable/time-exceeded → error, packet-too-big/redirect →
+  warning) au lieu de tomber dans le vide (ni TCP ni UDP ni ICMPv4, donc
+  aucun trafic ICMPv6 n'était jamais émis). (2) déjà couvert par CAP-1 sans
+  que le constat initial le sache : le filtre cBPF généré au runtime
+  (`capture/bpf.go`) lit déjà le next-header IPv6 à l'offset fixe correct
+  (20, pas l'ancien 0x36 statique) et accepte déjà tout ICMPv6
+  (`TestBuildL7Filter_ICMPv6AlwaysAccepted` existait déjà) — la génération
+  runtime du filtre (CAP-1, postérieure à l'audit initial) avait déjà réglé
+  ce point. (3) `struct event` (bpf/tls.bpf.c) passe de `saddr/daddr`
+  4 octets à 16 (family `AF_INET`/`AF_INET6` en tête), `sock_common` CO-RE
+  gagne `skc_v6_daddr`/`skc_v6_rcv_saddr`, `record_tuple` bascule sur la
+  famille lue ; `decodeEvent` (loader.go) décode 4 ou 16 octets selon
+  `family`. `.o`/bindings Go régénérés via `go generate` (bpf2go + un vrai
+  clang `-target bpf`, headers libbpf récupérés du module cache
+  `cilium/ebpf` — possible ici car ce sandbox est Linux, contrairement au
+  précédent). Tests `TestRouteDispatchesICMPv6`, `TestICMP6DescSeverity`,
+  `TestDecodeEventWithIPv6Tuple`, `TestDecodeEventUnknownFamilyIgnoresAddr`.
+- **CAP-8** : dédup par empreinte `(seq, len)` par direction et par flow
+  (`segFingerprint.seenRecently`, dissect_l4.go), fenêtre de 5 ms
+  (`dedupWindow`) — un paquet payload déjà vu à seq/len identiques dans la
+  fenêtre est la même trame vue une seconde/troisième fois via une autre
+  interface locale (eth0 + overlay CNI + veth), pas une vraie
+  retransmission (qui a besoin d'au moins un aller-retour réseau réel —
+  RTO minimum Linux 200 ms). Bornée aux paquets avec payload : un ACK/SYN/
+  FIN à payload nul peut légitimement répéter le même seq sur des paquets
+  réellement distincts (ACKs dupliqués déclenchant un fast-retransmit,
+  keep-alive d'un émetteur à l'arrêt), donc seq+len seuls n'identifient un
+  doublon en confiance que pour une tranche précise du flux de données.
+  L'empreinte reste épinglée à la PREMIÈRE occurrence (pas mise à jour sur
+  un doublon détecté), donc une 3e livraison compare toujours contre
+  l'originale. Effet de bord découvert en testant : un test existant
+  (`TestTrackTCPSnapshotL4`) simulait une « retransmission » à seulement
+  1 ms de l'original — trop rapide pour être un vrai retransmit réseau,
+  donc désormais correctement traité comme un doublon par le nouveau
+  garde-fou ; le test a été corrigé pour un écart réaliste (200 ms, RTO
+  minimum) plutôt que d'affaiblir la fenêtre de dédup. Tests
+  `TestSegFingerprintSeenRecently`,
+  `TestTrackTCPDedupsSamePacketAcrossInterfaces`,
+  `TestTrackTCPCountsRealRetransmitOutsideDedupWindow` (garde-fou inverse :
+  un vrai retransmit hors fenêtre compte toujours).
+- **OPS-10** : nouveau job `e2e-kind` dans `ci.yml` — build local des deux
+  images (`docker/build-push-action` en `push:false,load:true`, jamais
+  publiées), cluster kind (`helm/kind-action`, épinglé par SHA), `helm
+  install --set worker.demo=true --wait`, puis sonde la vraie API du hub
+  via `kubectl port-forward` : `/healthz`, un worker `connected` sur
+  `/api/workers`, au moins une entry sur `/api/entries` — attrape les
+  régressions de manifeste/probes/RBAC/args qu'aucun test Go ne voit,
+  bloquant comme le reste de la CI (le job `docker` de publication en
+  dépend désormais aussi). Volet supply-chain : nouveau job `image-scan`
+  (trivy sur les deux images, `CRITICAL,HIGH`, non-fixés ignorés) —
+  `continue-on-error` pour l'instant (aucune baseline triée des CVE
+  d'image de base existantes, même logique de démarrage « informatif
+  d'abord » que les benchmarks de TST-7) ; `docker/build-push-action`
+  (job `docker`, images publiées) gagne `provenance: true` et `sbom:
+  true`. Les deux actions tierces nouvellement introduites
+  (`helm/kind-action`, `aquasecurity/trivy-action`) sont épinglées par SHA
+  de commit complet (pas juste un tag mutable) — cohérent avec l'objectif
+  de durcissement supply-chain de ce même chantier, `trivy-action` ayant
+  justement été historiquement touché par un incident de la chaîne
+  d'approvisionnement GitHub Actions.
+- **TST-8** : nouveau workflow séparé `nightly-e2e.yml` (cron quotidien +
+  `workflow_dispatch`, jamais bloquant pour une PR) — même socle que
+  `e2e-kind` mais **sans** `--demo` : déploie un `nginx` cible et un
+  générateur `curl` en boucle dans un namespace dédié, attend un worker
+  `connected` avec `captureLive`, puis interroge le hub avec le filtre IFL
+  `protocol == http and dst.namespace == demo-traffic` jusqu'à voir des
+  entries — preuve que la capture AF_PACKET réelle (hostNetwork +
+  capabilities du DaemonSet) et l'enrichissement k8s (RBAC du hub) sur le
+  chemin réel fonctionnent, distinct du chemin `--demo` d'OPS-10 qui ne
+  les exerce pas. Marge de 40 tentatives × 5 s sur ce dernier palier pour
+  couvrir un cycle complet de rafraîchissement du resolver
+  (`enrichInterval` 20 s, k8s.go).
+
+  Note de vérification : contrairement au constat initial de l'audit («
+  CI/kubes non exerçables dans ce sandbox macOS »), cette session tourne
+  sur un hôte Linux réel — `clang -target bpf` fonctionne (permettant la
+  vérification CAP-7 ci-dessus), mais ni `docker` (démon injoignable) ni
+  `kind` ne sont disponibles ici, donc `e2e-kind` et `nightly-e2e.yml`
+  n'ont pas pu être exécutés de bout en bout dans ce sandbox — noms de
+  ressources (Service/Deployment/DaemonSet), champs JSON (`connected`,
+  `captureLive`) et schéma de valeurs Helm (`image.registry`/`binary`/
+  `front`/`tag`/`pullPolicy`, `worker.demo`) vérifiés à la main contre le
+  code et le chart réels ; `gofmt`/`go vet`/`go build`/`go test -race
+  ./...` (256 tests) propres. CI fera foi pour ces deux workflows, comme
+  pour `helm lint` en son temps.
+
+Reste du backlog hors Phase 3 : **EXT-5** (screenshots/GIF, nécessite
+navigateur/asciinema — hors périmètre de ce sandbox aussi). Le thème
+sécurité (SEC-1 à SEC-9) est intégralement traité, **tous les dissecteurs
+L7 du backlog sont livrés** (DNS-TCP, WebSocket, MySQL, MongoDB, Kafka +
+propriétés AMQP), et CAP-7/8, OPS-10, TST-8 clôturent le reste du backlog
+capture/CI identifié par l'audit initial.
 Prochain chantier logique : **Phase 3** (gros
 chantiers : DIS-1 HTTP/2+gRPC, CAP-4 Go crypto/tls, HUB-1 persistance, EXT-1
 tap targeting, OPS-2/OPS-3 release automatisée + arm64 — voir plus bas).
