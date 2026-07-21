@@ -13,10 +13,12 @@ import (
 )
 
 type tlsConnTuple struct {
-	Saddr uint32
-	Daddr uint32
-	Sport uint16
-	Dport uint16
+	Saddr  [16]uint8
+	Daddr  [16]uint8
+	Sport  uint16
+	Dport  uint16
+	Family uint8
+	_      [1]byte
 }
 
 type tlsReadCtx struct {

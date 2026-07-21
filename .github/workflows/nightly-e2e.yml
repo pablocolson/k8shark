@@ -1,0 +1,148 @@
+name: Nightly e2e (kind, real capture)
+
+# TST-8: the only way to exercise the DaemonSet's RBAC, hostNetwork,
+# capabilities and the real AF_PACKET path — as opposed to ci.yml's e2e-kind
+# job, which installs with --set worker.demo=true and never touches capture
+# at all. Separate from ci.yml on purpose: this deploys a traffic generator
+# and waits on the hub's k8s-enrichment refresh cycle (internal/hub/k8s.go's
+# enrichInterval), which makes it slower and occasionally flakier than a PR
+# should have to wait on — nightly + manual dispatch only, never blocks a PR.
+on:
+  schedule:
+    - cron: "17 3 * * *" # ~03:17 UTC daily (odd minute so it isn't fighting every other repo's on-the-hour jobs for runners)
+  workflow_dispatch: {}
+
+jobs:
+  real-capture-kind:
+    name: Real AF_PACKET capture on kind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build k8shark image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/k8shark.Dockerfile
+          push: false
+          load: true
+          tags: local/k8shark:nightly
+          build-args: VERSION=nightly-e2e
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=nightly-bin
+
+      - name: Build front image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/front.Dockerfile
+          push: false
+          load: true
+          tags: local/k8shark-front:nightly
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=nightly-front
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: kind
+
+      - uses: azure/setup-helm@v4
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image local/k8shark:nightly --name kind
+          kind load docker-image local/k8shark-front:nightly --name kind
+
+      # No --set worker.demo=true here, unlike ci.yml's e2e-kind — the whole
+      # point of this workflow is to exercise the real capture path (AF_PACKET
+      # + hostNetwork + capabilities + RBAC-driven k8s enrichment).
+      - name: helm install (real capture)
+        run: |
+          helm install k8shark helm/k8shark \
+            --set image.registry=local \
+            --set image.binary=k8shark \
+            --set image.front=k8shark-front \
+            --set image.tag=nightly \
+            --set image.pullPolicy=Never \
+            --wait --timeout=5m
+
+      - name: Deploy an HTTP traffic target + generator
+        run: |
+          kubectl create namespace demo-traffic
+          kubectl -n demo-traffic create deployment nginx-target --image=nginx:stable
+          kubectl -n demo-traffic expose deployment nginx-target --port=80
+          kubectl -n demo-traffic rollout status deployment/nginx-target --timeout=120s
+
+          kubectl -n demo-traffic create deployment curl-generator --image=curlimages/curl:latest \
+            -- sh -c 'while true; do curl -s -o /dev/null http://nginx-target.demo-traffic.svc.cluster.local/; sleep 1; done'
+          kubectl -n demo-traffic rollout status deployment/curl-generator --timeout=120s
+
+      - name: Verify real capture + k8s enrichment via the hub API
+        run: |
+          set -uo pipefail
+          # Deliberately not `set -e` — see ci.yml's e2e-kind job for why.
+          HUB=http://localhost:8898
+          kubectl port-forward svc/k8shark-hub 8898:8898 >/tmp/port-forward.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+
+          echo "waiting for $HUB/healthz ..."
+          ok=0
+          for i in $(seq 1 20); do
+            if curl -fsS "$HUB/healthz" >/tmp/healthz.out 2>&1; then ok=1; break; fi
+            sleep 3
+          done
+          cat /tmp/healthz.out 2>/dev/null || true
+          echo
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: hub never became healthy"
+            exit 1
+          fi
+
+          echo "waiting for the worker to register as connected (real capture, not --demo)..."
+          ok=0
+          for i in $(seq 1 30); do
+            n=$(curl -fsS "$HUB/api/workers" 2>/dev/null | jq '[.[] | select(.connected and .captureLive)] | length' 2>/dev/null)
+            if [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null; then ok=1; break; fi
+            sleep 5
+          done
+          curl -fsS "$HUB/api/workers" 2>/dev/null || true
+          echo
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: no worker connected with live AF_PACKET capture"
+            exit 1
+          fi
+
+          # Give the hub's k8s-enrichment resolver at least one full refresh
+          # cycle (enrichInterval, 20s) past pod creation before expecting
+          # src.name/dst.namespace to be populated on fresh entries.
+          echo "waiting for real HTTP entries with k8s enrichment (dst.namespace populated)..."
+          ok=0
+          for i in $(seq 1 40); do
+            n=$(curl -fsS -G --data-urlencode 'filter=protocol == http and dst.namespace == demo-traffic' "$HUB/api/entries" 2>/dev/null | jq 'length' 2>/dev/null)
+            if [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null; then ok=1; break; fi
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: no HTTP entries with dst.namespace == demo-traffic arrived"
+            echo "--- last 5 http entries seen (any namespace) ---"
+            curl -fsS -G --data-urlencode 'filter=protocol == http' --data-urlencode 'limit=5' "$HUB/api/entries" 2>/dev/null || true
+            exit 1
+          fi
+          echo "OK: found $n enriched HTTP entries (dst.namespace == demo-traffic)"
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          echo "--- k8shark (default namespace) ---"
+          kubectl get all
+          kubectl describe deploy/k8shark-hub || true
+          kubectl logs deploy/k8shark-hub --tail=200 || true
+          kubectl describe daemonset/k8shark-worker || true
+          kubectl logs daemonset/k8shark-worker --tail=200 || true
+          echo "--- demo-traffic namespace ---"
+          kubectl -n demo-traffic get all || true
+          kubectl -n demo-traffic logs deploy/curl-generator --tail=50 || true
