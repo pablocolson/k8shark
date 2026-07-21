@@ -285,8 +285,15 @@ export const TrafficTable = memo(function TrafficTable({
     if (prependedCount <= 0) return; // not found (buffer reset) or nothing prepended
 
     if (el.scrollTop > 0) {
-      el.scrollTop += prependedCount * ROW_HEIGHT;
-      setNewCount((n) => n + prependedCount);
+      const before = el.scrollTop;
+      el.scrollTop = before + prependedCount * ROW_HEIGHT;
+      // Pinned at the bottom of a capped buffer, the compensating scroll has
+      // nowhere left to go — the browser clamps the write and the visible
+      // rows don't actually move. Count only what really scrolled, or the
+      // pill climbs forever (thousands of "new entries") even though the
+      // user is sitting still at the end of the list.
+      const movedRows = Math.round((el.scrollTop - before) / ROW_HEIGHT);
+      if (movedRows > 0) setNewCount((n) => n + movedRows);
     }
   }, [displayEntries, sort]);
 
