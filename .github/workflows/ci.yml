@@ -107,9 +107,192 @@ jobs:
       - name: deploy manifest drift check
         run: make deploy-manifest-check
 
+  # OPS-10: the rest of this file only ever checks that the Go/UI code builds
+  # and the chart's templates render — nothing exercises an actual install.
+  # That misses regressions in probes, RBAC, container args and worker/hub
+  # wiring that no unit test can see. This job builds the real images (not
+  # pushed — see docker/build-push-action's push:false,load:true below),
+  # spins up a throwaway kind cluster, installs the chart in demo mode (no
+  # privileged capture needed, so it's safe on a shared GitHub-hosted
+  # runner) and hits the real hub API through a port-forward.
+  e2e-kind:
+    name: e2e smoke (kind)
+    needs: [go, ui, helm-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build k8shark image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/k8shark.Dockerfile
+          push: false
+          load: true
+          tags: local/k8shark:e2e
+          build-args: VERSION=e2e-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=e2e-bin
+
+      - name: Build front image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/front.Dockerfile
+          push: false
+          load: true
+          tags: local/k8shark-front:e2e
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=e2e-front
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: kind
+
+      - uses: azure/setup-helm@v4
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image local/k8shark:e2e --name kind
+          kind load docker-image local/k8shark-front:e2e --name kind
+
+      - name: helm install (demo mode)
+        run: |
+          helm install k8shark helm/k8shark \
+            --set image.registry=local \
+            --set image.binary=k8shark \
+            --set image.front=k8shark-front \
+            --set image.tag=e2e \
+            --set image.pullPolicy=Never \
+            --set worker.demo=true \
+            --wait --timeout=5m
+
+      - name: Smoke test against the real hub API
+        run: |
+          set -uo pipefail
+          # Deliberately not `set -e`: every check below is expected to fail
+          # for the first several seconds while pods come up, so this polls
+          # explicitly instead of relying on errexit semantics.
+          HUB=http://localhost:8898
+          kubectl port-forward svc/k8shark-hub 8898:8898 >/tmp/port-forward.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+
+          echo "waiting for $HUB/healthz ..."
+          ok=0
+          for i in $(seq 1 20); do
+            if curl -fsS "$HUB/healthz" >/tmp/healthz.out 2>&1; then ok=1; break; fi
+            sleep 3
+          done
+          cat /tmp/healthz.out 2>/dev/null || true
+          echo
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: hub never became healthy"
+            exit 1
+          fi
+
+          echo "waiting for the demo worker to register as connected..."
+          ok=0
+          for i in $(seq 1 20); do
+            n=$(curl -fsS "$HUB/api/workers" 2>/dev/null | jq '[.[] | select(.connected)] | length' 2>/dev/null)
+            if [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null; then ok=1; break; fi
+            sleep 3
+          done
+          curl -fsS "$HUB/api/workers" 2>/dev/null || true
+          echo
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: no worker registered as connected"
+            exit 1
+          fi
+
+          echo "waiting for demo traffic to reach /api/entries..."
+          ok=0
+          for i in $(seq 1 20); do
+            n=$(curl -fsS "$HUB/api/entries" 2>/dev/null | jq 'length' 2>/dev/null)
+            if [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null; then ok=1; break; fi
+            sleep 3
+          done
+          echo "entries seen: ${n:-0}"
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: no entries arrived via /api/entries"
+            exit 1
+          fi
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get all
+          echo "--- hub ---"
+          kubectl describe deploy/k8shark-hub || true
+          kubectl logs deploy/k8shark-hub --tail=200 || true
+          echo "--- worker ---"
+          kubectl describe daemonset/k8shark-worker || true
+          kubectl logs daemonset/k8shark-worker --tail=200 || true
+
+  # OPS-10: first-pass image scanning. continue-on-error on the scan steps
+  # (not the whole job) so a finding shows up as a clearly visible failed
+  # step without blocking merges yet — there's no triaged baseline for
+  # pre-existing base-image CVEs. Same rollout as TST-7's benchmarks
+  # (informative first, thresholds once there's a baseline): once findings
+  # are fixed or allow-listed via .trivyignore, drop continue-on-error so
+  # new CRITICAL/HIGH vulnerabilities actually gate the build.
+  image-scan:
+    name: Image vulnerability scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build k8shark image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/k8shark.Dockerfile
+          push: false
+          load: true
+          tags: k8shark:scan
+          build-args: VERSION=scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=scan-bin
+
+      - name: Build front image (local, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/front.Dockerfile
+          push: false
+          load: true
+          tags: k8shark-front:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=scan-front
+
+      - name: Scan k8shark image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: k8shark:scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan front image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: k8shark-front:scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
   docker:
     name: Build & push images
-    needs: [go, ui, helm-lint]
+    needs: [go, ui, helm-lint, e2e-kind]
     # Only push on main / tags — PRs just build (no push, no registry auth needed).
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -149,6 +332,12 @@ jobs:
           build-args: VERSION=${{ steps.meta-bin.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # OPS-10: attach build provenance (SLSA-style attestation of how/
+          # where the image was built) and an SBOM (package inventory) to the
+          # pushed manifest, so consumers can verify origin and audit contents
+          # without re-scanning the image themselves.
+          provenance: true
+          sbom: true
 
       - name: Metadata (front image)
         id: meta-front
@@ -171,3 +360,5 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
