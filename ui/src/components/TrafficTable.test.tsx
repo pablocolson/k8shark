@@ -266,6 +266,34 @@ describe("TrafficTable", () => {
       expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
     });
 
+    it("counts only the actual scroll delta when clamped at the bottom, not the raw prepended count", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" }), entry({ id: "d" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+
+      // jsdom's scrollTop is a plain unclamped number; simulate what a real
+      // browser does once the buffer is at its cap and the total scroll
+      // height stops growing — writing past the max silently clamps back to
+      // it instead of taking the write, which is how a user pinned at the
+      // live edge of a full, churning buffer actually behaves.
+      const MAX = 100;
+      let actual = MAX;
+      Object.defineProperty(scrollEl, "scrollTop", {
+        get: () => actual,
+        set: (v: number) => {
+          actual = Math.min(v, MAX);
+        },
+        configurable: true,
+      });
+
+      // One prepend while already pinned at MAX — the compensating write has
+      // nowhere to go, so nothing actually moved.
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "a" }), ...initial]} />);
+
+      expect(scrollEl.scrollTop).toBe(MAX);
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
+    });
+
     it("resets the pill count when the user manually scrolls back to the top", () => {
       const initial = [entry({ id: "b" }), entry({ id: "c" })];
       const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
