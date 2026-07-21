@@ -5,10 +5,14 @@ server {
     index index.html;
 
     # REST API -> hub. HUB_TOKEN carries the optional hub API token (empty
-    # when auth is off; the hub ignores the header then).
+    # when auth is off; the hub ignores the header then). Host must be
+    # $http_host, not $host: nginx's $host silently drops the port, but the
+    # hub's same-origin check compares against the browser's Origin header,
+    # which keeps it (e.g. a port-forward on a non-default port) — with
+    # $host that mismatch makes the hub reject every request as cross-origin.
     location /api/ {
         proxy_pass ${HUB_SCHEME}://${HUB_HOST}:${HUB_PORT};
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header Authorization "Bearer ${HUB_TOKEN}";
     }
 
@@ -18,7 +22,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header Authorization "Bearer ${HUB_TOKEN}";
         proxy_read_timeout 3600s;
     }
