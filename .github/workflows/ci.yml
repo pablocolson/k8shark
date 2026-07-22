@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - run: helm lint helm/k8shark
 
       # Anti-drift guard (OPS-6): fail if the hand-maintained deploy/k8shark.yaml
@@ -152,7 +152,7 @@ jobs:
         with:
           cluster_name: kind
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: Load images into kind
         run: |

@@ -49,7 +49,7 @@ jobs:
         with:
           cluster_name: kind
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: Load images into kind
         run: |
