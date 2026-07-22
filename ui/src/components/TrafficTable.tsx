@@ -273,6 +273,13 @@ export const TrafficTable = memo(function TrafficTable({
     if (sort || newTopId === null) {
       topIdRef.current = newTopId;
       setNewCount(0);
+      // The buffer was wiped wholesale (Clear, a filter change, a loaded
+      // range) rather than just streamed into. Leaving scrollTop wherever it
+      // was points the viewport at an offset the now-empty/rebuilding list
+      // has no content for — new rows landing while compensation is still
+      // measured against that stale position read as arriving "in the
+      // middle" of the view instead of at the top.
+      if (newTopId === null && scrollRef.current) scrollRef.current.scrollTop = 0;
       return;
     }
 
