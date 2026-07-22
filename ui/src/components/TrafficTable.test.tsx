@@ -307,6 +307,26 @@ describe("TrafficTable", () => {
       fireEvent.scroll(scrollEl);
       expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
     });
+
+    // Regression: Clear (or a filter change / range load) resets `entries`
+    // to [] without touching scroll position. Left scrolled deep into the
+    // old list, the viewport pointed at an offset the emptied/rebuilding
+    // list had no content for — read by the user as old rows lingering or
+    // new ones landing "in the middle" instead of at the top.
+    it("resets scrollTop when entries is wiped wholesale (Clear / filter change)", () => {
+      const initial = [entry({ id: "b" }), entry({ id: "c" }), entry({ id: "d" })];
+      const { rerender } = render(<TrafficTable {...baseProps} entries={initial} />);
+      const scrollEl = document.querySelector(".table-wrap") as HTMLDivElement;
+      scrollEl.scrollTop = 5000; // scrolled well away from the top
+
+      rerender(<TrafficTable {...baseProps} entries={[]} />);
+      expect(scrollEl.scrollTop).toBe(0);
+
+      // New traffic then streams back in from a clean baseline: no leftover
+      // "new entries" pill implying there's old content above to catch up to.
+      rerender(<TrafficTable {...baseProps} entries={[entry({ id: "e" })]} />);
+      expect(screen.queryByText(/new entr/)).not.toBeInTheDocument();
+    });
   });
 
   // UI-8: with a column sort active, the old code copied and re-sorted the
