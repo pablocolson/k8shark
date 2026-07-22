@@ -7,7 +7,7 @@
 # .o objects are committed and pulled in via go:embed, so the image needs no
 # clang/llvm/libbpf toolchain. CO-RE relocates the embedded .o against node BTF
 # at load time, no compiler needed at runtime either.
-FROM golang:1.24-bookworm AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \
     linux-libc-dev \
