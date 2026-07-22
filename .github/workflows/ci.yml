@@ -125,7 +125,7 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       - name: Build k8shark image (local, not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/k8shark.Dockerfile
@@ -137,7 +137,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=e2e-bin
 
       - name: Build front image (local, not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/front.Dockerfile
@@ -248,7 +248,7 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       - name: Build k8shark image (local, not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/k8shark.Dockerfile
@@ -260,7 +260,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=scan-bin
 
       - name: Build front image (local, not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/front.Dockerfile
@@ -321,7 +321,7 @@ jobs:
             type=semver,pattern={{version}}
 
       - name: Build & push k8shark (hub + worker)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/k8shark.Dockerfile
@@ -350,7 +350,7 @@ jobs:
             type=semver,pattern={{version}}
 
       - name: Build & push front
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: build/front.Dockerfile
