@@ -312,7 +312,7 @@ jobs:
 
       - name: Metadata (binary image)
         id: meta-bin
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_BASE }}
           tags: |
@@ -341,7 +341,7 @@ jobs:
 
       - name: Metadata (front image)
         id: meta-front
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_BASE }}-front
           tags: |
