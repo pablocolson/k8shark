@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,11 +38,14 @@ const (
 //	http.method == "GET" and response.status >= 500
 //	protocol == "dns" or dst.namespace == "kube-system"
 //	not (src.name contains "canary")
+//	dst.ip == "10.0.0.0/8"          # CIDR range containment, not string equality
 //	"checkout"                      # bare token = full-text substring match
 //
 // Supported operators: == != contains matches startswith > < >= <= ; a list
 // membership test, field in ("a", "b", "c"); boolean and/or/not with
-// parentheses. An empty expression matches everything.
+// parentheses. == and != against a CIDR literal (either IP family) test range
+// containment rather than string equality. An empty expression matches
+// everything.
 func CompileFilter(expr string) (Predicate, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
@@ -391,9 +395,26 @@ func buildFieldPredicate(field string, match func(actual string) bool) (Predicat
 	return func(e *api.Entry) bool { return match(getter(e)) }, nil
 }
 
-// compare evaluates "actual op want". Numeric comparison is used when both
-// sides parse as numbers; otherwise string comparison (case-insensitive).
+// compare evaluates "actual op want". want in CIDR form (e.g. "10.0.0.0/8")
+// makes == / != a range-containment test against actual as an IP (either
+// family), instead of the literal string compare they'd otherwise fall to —
+// no *.ip field's real value is ever itself a CIDR literal, so this can't
+// misfire against a legitimate exact-match use. Otherwise numeric comparison
+// is used when both sides parse as numbers; failing that, string comparison
+// (case-insensitive).
 func compare(actual, op, want string) bool {
+	if op == "==" || op == "!=" {
+		if _, ipnet, err := net.ParseCIDR(want); err == nil {
+			contained := false
+			if ip := net.ParseIP(actual); ip != nil {
+				contained = ipnet.Contains(ip)
+			}
+			if op == "!=" {
+				return !contained
+			}
+			return contained
+		}
+	}
 	af, aerr := strconv.ParseFloat(actual, 64)
 	wf, werr := strconv.ParseFloat(want, 64)
 	numeric := aerr == nil && werr == nil

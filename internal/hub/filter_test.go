@@ -616,6 +616,85 @@ func TestStartswithOperator(t *testing.T) {
 	}
 }
 
+// TestCIDRMatching exercises == / != against a CIDR literal on an IP field:
+// range containment, not the literal string equality every other == compare
+// does (dst.ip is never itself the literal string "10.0.0.0/8", so this
+// can't misfire against a real exact-match use).
+func TestCIDRMatching(t *testing.T) {
+	e := sample() // Source.IP == "10.0.1.10", Destination.IP == "10.0.1.14"
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`dst.ip == "10.0.0.0/8"`, true},
+		{`dst.ip == "10.0.1.0/24"`, true},
+		{`dst.ip == "10.0.1.14/32"`, true}, // single-host CIDR
+		{`dst.ip == "10.0.2.0/24"`, false}, // adjacent /24, not containing
+		{`dst.ip == "192.168.0.0/16"`, false},
+		{`dst.ip != "10.0.2.0/24"`, true}, // negation: not contained -> true
+		{`dst.ip != "10.0.0.0/8"`, false}, // negation: contained -> false
+		{`src.ip == "10.0.1.0/24"`, true},
+		{`dst.ip == "10.0.1.14"`, true}, // plain literal, unaffected by CIDR handling
+		{`dst.ip == "10.0.1.15"`, false},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+// TestCIDRMatchingIPv6 mirrors TestCIDRMatching for an IPv6 destination —
+// net.ParseCIDR/ParseIP handle both families, so this should need no
+// separate code path.
+func TestCIDRMatchingIPv6(t *testing.T) {
+	e := sample()
+	e.Destination.IP = "2001:db8::1"
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{`dst.ip == "2001:db8::/32"`, true},
+		{`dst.ip == "2001:db9::/32"`, false},
+		{`dst.ip != "2001:db9::/32"`, true},
+	}
+	for _, c := range cases {
+		pred, err := CompileFilter(c.expr)
+		if err != nil {
+			t.Errorf("CompileFilter(%q) error: %v", c.expr, err)
+			continue
+		}
+		if got := pred(e); got != c.want {
+			t.Errorf("filter %q = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+// TestCIDRMatchingFallsBackOnUnparseableCIDR checks that a want value which
+// merely contains a slash but isn't a valid CIDR (or an actual value that
+// isn't a parseable IP) degrades to a plain false rather than panicking or
+// erroring — the compile still succeeds, it just never matches.
+func TestCIDRMatchingFallsBackOnUnparseableCIDR(t *testing.T) {
+	e := sample()
+	for _, expr := range []string{
+		`dst.ip == "not/a/cidr"`,
+		`request.path == "10.0.0.0/8"`, // want parses as CIDR, actual ("/api/checkout") isn't an IP
+	} {
+		pred, err := CompileFilter(expr)
+		if err != nil {
+			t.Fatalf("CompileFilter(%q) error: %v", expr, err)
+		}
+		if pred(e) {
+			t.Errorf("filter %q matched, want false", expr)
+		}
+	}
+}
+
 // TestInOperator exercises the "in (...)" list-membership operator: quoted
 // strings, bare numbers, case-insensitivity, and the either-side namespace
 // pseudo-field.

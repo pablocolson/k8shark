@@ -27,6 +27,7 @@ const EXAMPLES = [
   'redis.command contains "SET"',
   'dst.namespace == "shop"',
   'request.path contains "checkout"',
+  'dst.ip == "10.0.0.0/8"',
 ];
 
 // Recently-applied filters, persisted client-side so a returning session (or
