@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.25"
   NODE_VERSION: "22"
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/k8shark
